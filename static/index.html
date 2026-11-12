@@ -1,0 +1,502 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#09827e">
+<title>Vinted Niche Watch</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%2309827e'/%3E%3Cpath d='M9 17l4 4 10-11' stroke='white' stroke-width='3.2' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
+<style>
+:root{
+  --brand:#09827e; --brand-strong:#066b68; --brand-soft:#e3f3f2;
+  --bg:#f4f6f6; --card:#ffffff; --text:#14201f; --muted:#5f6f6e; --line:#e2e8e7;
+  --input:#fbfcfc; --hit:#fff1e0; --hit-line:#f59e0b; --hit-text:#9a4b00;
+  --ok:#0e9f6e; --warn:#d97706; --err:#dc2626;
+  --shadow:0 1px 2px rgba(16,40,38,.06),0 4px 16px rgba(16,40,38,.06);
+  --radius:16px;
+  color-scheme:light;
+}
+@media (prefers-color-scheme:dark){
+  :root{
+    --brand:#16a6a0; --brand-strong:#3cc2bc; --brand-soft:#0f2e2d;
+    --bg:#0d1414; --card:#151f1f; --text:#e5eeed; --muted:#8fa3a1; --line:#243231;
+    --input:#111a1a; --hit:#3a2a12; --hit-line:#f59e0b; --hit-text:#fbbf6a;
+    --shadow:0 1px 2px rgba(0,0,0,.3),0 6px 20px rgba(0,0,0,.25);
+    color-scheme:dark;
+  }
+}
+*{box-sizing:border-box}
+html{-webkit-text-size-adjust:100%}
+body{margin:0;background:var(--bg);color:var(--text);font:15px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;}
+a{color:var(--brand);text-decoration:none}
+a:hover{text-decoration:underline}
+header{position:sticky;top:0;z-index:10;background:var(--card);border-bottom:1px solid var(--line);}
+.bar{max-width:1180px;margin:0 auto;display:flex;align-items:center;gap:16px;padding:10px 16px;}
+.logo{display:flex;align-items:center;gap:10px;font-weight:700;font-size:17px;color:var(--text);white-space:nowrap}
+.logo i{width:30px;height:30px;border-radius:9px;background:var(--brand);display:grid;place-items:center;flex:none}
+.logo small{font-weight:500;color:var(--muted);font-size:12px;display:block;line-height:1}
+nav{margin-left:auto;display:flex;gap:4px;background:var(--bg);padding:4px;border-radius:12px}
+nav a{padding:7px 14px;border-radius:9px;color:var(--muted);font-weight:600;font-size:14px}
+nav a.on{background:var(--card);color:var(--brand);box-shadow:var(--shadow)}
+nav a:hover{text-decoration:none}
+.live-dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--ok);margin-left:6px;vertical-align:1px;animation:pulse 1.4s infinite}
+@keyframes pulse{50%{opacity:.25}}
+main{max-width:1180px;margin:0 auto;padding:18px 16px 60px}
+.card{background:var(--card);border-radius:var(--radius);box-shadow:var(--shadow);padding:20px;margin-bottom:16px;border:1px solid var(--line)}
+.card h2{margin:0 0 14px;font-size:17px}
+.card h3{margin:0 0 10px;font-size:15px}
+.muted{color:var(--muted)}
+.small{font-size:13px}
+.grid{display:grid;gap:16px}
+.g2{grid-template-columns:minmax(0,1fr) minmax(0,1fr)}
+.grid>*{min-width:0}
+@media (max-width:860px){.g2{grid-template-columns:minmax(0,1fr)}}
+label{display:block;font-size:13px;font-weight:600;color:var(--muted);margin-bottom:5px}
+input[type=text],input[type=number],input[type=url]{width:100%;padding:10px 12px;border-radius:10px;border:1px solid var(--line);background:var(--input);color:var(--text);font:inherit;}
+input:focus{outline:2px solid color-mix(in srgb,var(--brand) 45%,transparent);border-color:var(--brand)}
+.fields{display:grid;gap:12px;grid-template-columns:repeat(auto-fit,minmax(140px,1fr))}
+.hint{font-size:12px;color:var(--muted);margin-top:4px}
+.or{display:flex;align-items:center;gap:12px;color:var(--muted);font-size:13px;margin:16px 0}
+.or::before,.or::after{content:"";flex:1;height:1px;background:var(--line)}
+.chips{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
+.chip{background:var(--brand-soft);color:var(--brand-strong);border-radius:99px;padding:3px 10px;font-size:12px;font-weight:600}
+.chip.gray{background:var(--bg);color:var(--muted)}
+.chip.orange{background:var(--hit);color:var(--hit-text)}
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;border:0;border-radius:11px;padding:11px 20px;font:600 15px system-ui,sans-serif;cursor:pointer;background:var(--brand);color:#fff;text-decoration:none}
+.btn:hover{background:var(--brand-strong);text-decoration:none}
+.btn:disabled{opacity:.55;cursor:not-allowed}
+.btn.ghost{background:var(--bg);color:var(--text);border:1px solid var(--line)}
+.btn.ghost:hover{background:var(--line)}
+.btn.danger{background:var(--err)}
+.btn.sm{padding:7px 12px;font-size:13px;border-radius:9px}
+.row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+.spacer{flex:1}
+.check{display:flex;gap:10px;align-items:flex-start;font-size:14px;color:var(--text);font-weight:500;cursor:pointer;margin:0}
+.check input{width:18px;height:18px;accent-color:var(--brand);margin-top:1px}
+.err{background:color-mix(in srgb,var(--err) 12%,transparent);color:var(--err);border-radius:10px;padding:10px 12px;font-size:14px;margin-top:12px}
+.notice{background:var(--brand-soft);border-radius:12px;padding:12px 14px;font-size:14px;display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+.warnbox{background:var(--hit);color:var(--hit-text);border-radius:10px;padding:9px 12px;font-size:13px;margin-top:10px}
+/* progression */
+.phase{display:flex;justify-content:space-between;align-items:baseline;gap:10px;flex-wrap:wrap;margin-bottom:8px}
+.phase b{font-size:16px}
+.track{position:relative;height:14px;border-radius:99px;background:var(--bg);overflow:hidden;display:flex}
+.seg{position:relative;height:100%;overflow:hidden}
+.seg+.seg{border-left:2px solid var(--card)}
+.seg .fill{position:absolute;inset:0 auto 0 0;background:var(--brand);transition:width .6s}
+.seg.win .fill{background:var(--hit-line)}
+.legend{display:flex;gap:14px;font-size:12px;color:var(--muted);margin-top:6px;flex-wrap:wrap}
+.legend span::before{content:"";display:inline-block;width:9px;height:9px;border-radius:3px;background:var(--brand);margin-right:5px}
+.legend span.w::before{background:var(--hit-line)}
+.stats{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-top:18px}
+@media (max-width:700px){.stats{grid-template-columns:1fr 1fr}}
+.stat{background:var(--bg);border-radius:12px;padding:12px 14px;min-width:0}
+.stat .v{font-size:24px;font-weight:700;line-height:1.2;font-variant-numeric:tabular-nums}
+.stat .l{font-size:12px;color:var(--muted);font-weight:600}
+.api{font-size:14px;font-weight:600;line-height:1.3;margin-top:4px}
+.api::before{content:"";display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:6px;background:var(--muted)}
+.api.ok::before{background:var(--ok)} .api.warn::before{background:var(--warn)} .api.error::before{background:var(--err)}
+.api.warn{color:var(--warn)} .api.error{color:var(--err)}
+/* top annonces */
+.items{display:grid;gap:10px}
+.it{display:flex;gap:12px;align-items:center;padding:8px;border-radius:12px;border:1px solid var(--line);background:var(--card);color:var(--text)}
+.it:hover{text-decoration:none;border-color:var(--brand)}
+.it.hit{background:var(--hit);border-color:var(--hit-line)}
+.it img{width:52px;height:68px;object-fit:cover;border-radius:8px;background:var(--bg);flex:none}
+.it .rk{width:22px;text-align:center;font-weight:700;color:var(--muted);flex:none}
+.it .mid{flex:1;min-width:0}
+.it .mid>span{display:block}
+.it .t{font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.it .s{font-size:12px;color:var(--muted)}
+.it .f{text-align:right;flex:none}
+.it .f b{font-size:20px;display:block;line-height:1.1}
+.it .f span{font-size:11px;color:var(--muted)}
+.empty{color:var(--muted);text-align:center;padding:26px 10px;font-size:14px}
+/* tables */
+.tw{overflow-x:auto;-webkit-overflow-scrolling:touch;margin:0 -4px;padding:0 4px}
+table{width:100%;border-collapse:collapse;font-size:14px;font-variant-numeric:tabular-nums}
+th,td{padding:9px 10px;text-align:left;border-bottom:1px solid var(--line);white-space:nowrap}
+th{font-size:12px;color:var(--muted);font-weight:700;position:sticky;top:0;background:var(--card);user-select:none}
+th.sortable{cursor:pointer}
+th.sortable:hover{color:var(--text)}
+th.sorted{color:var(--brand)}
+th .ar{font-size:10px;margin-left:3px}
+td.n,th.n{text-align:right}
+td.title{max-width:260px;overflow:hidden;text-overflow:ellipsis}
+tr.hit td{background:var(--hit)}
+tr.hit td:first-child{box-shadow:inset 3px 0 var(--hit-line)}
+td img{width:34px;height:44px;object-fit:cover;border-radius:6px;vertical-align:middle;background:var(--bg)}
+.score{font-weight:700;color:var(--brand)}
+.tag{font-size:11px;font-weight:700;border-radius:6px;padding:2px 6px}
+.tag.hit{background:var(--hit-line);color:#fff}
+.tag.p{background:var(--bg);color:var(--muted)}
+/* historique */
+.hist{display:grid;gap:12px}
+.h{display:grid;grid-template-columns:1fr auto;gap:10px;align-items:center}
+.h .top{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.h .meta{font-size:13px;color:var(--muted);margin-top:4px}
+.st{font-size:11px;font-weight:700;border-radius:6px;padding:2px 7px;text-transform:uppercase;letter-spacing:.03em}
+.st.done{background:var(--brand-soft);color:var(--brand-strong)}
+.st.running{background:color-mix(in srgb,var(--ok) 18%,transparent);color:var(--ok)}
+.st.stopped,.st.interrupted{background:var(--bg);color:var(--muted)}
+.st.error{background:color-mix(in srgb,var(--err) 15%,transparent);color:var(--err)}
+@media (max-width:560px){
+  .h{grid-template-columns:1fr}
+  .logo small{display:none}
+  nav a{padding:7px 10px}
+  .card{padding:16px}
+  main{padding:12px 12px 50px}
+}
+.kv{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:10px;margin-top:12px}
+.kv div{background:var(--bg);border-radius:10px;padding:9px 12px}
+.kv b{display:block;font-size:17px}
+.kv span{font-size:12px;color:var(--muted);font-weight:600}
+.hidden{display:none!important}
+</style>
+</head>
+<body>
+<header>
+  <div class="bar">
+    <a class="logo" href="#veille"><i><svg width="18" height="18" viewBox="0 0 32 32"><path d="M7 17l5 5 13-13" stroke="#fff" stroke-width="4" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg></i>
+      <span>Niche Watch<small>Vinted</small></span></a>
+    <nav>
+      <a href="#veille" id="nav-veille">Veille<span id="navdot" class="live-dot hidden"></span></a>
+      <a href="#historique" id="nav-historique">Historique</a>
+    </nav>
+  </div>
+</header>
+<main id="app"></main>
+
+<script>
+"use strict";
+const $ = (s, el = document) => el.querySelector(s);
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const nf = (x, d = 0) => x == null || x === "" ? "–" : Number(x).toLocaleString("fr-FR", {maximumFractionDigits: d, minimumFractionDigits: 0});
+const eur = x => x == null ? "–" : Number(x).toLocaleString("fr-FR", {style: "currency", currency: "EUR", maximumFractionDigits: 2});
+const dt = t => t ? new Date(t * 1000).toLocaleString("fr-FR", {day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit"}) : "–";
+const dur = s => { s = Math.max(0, Math.round(s)); const h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60), ss = s % 60;
+  return h ? `${h} h ${String(m).padStart(2, "0")}` : m ? `${m} min ${String(ss).padStart(2, "0")}` : `${ss} s`; };
+const STATUS = {running: "En cours", done: "Terminée", stopped: "Arrêtée", interrupted: "Interrompue", error: "Erreur"};
+
+async function api(path, opts = {}) {
+  const r = await fetch(path, {headers: {"Content-Type": "application/json"}, ...opts});
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) {
+    let msg = data.detail;
+    if (Array.isArray(msg)) msg = msg.map(e => `${(e.loc || []).slice(-1)[0]} : ${e.msg}`).join(" · ");
+    throw new Error(msg || `Erreur ${r.status}`);
+  }
+  return data;
+}
+
+/* ---------- routage ---------- */
+let pollTimer = null, renderToken = 0;
+function stopPoll() { clearTimeout(pollTimer); pollTimer = null; }
+async function route() {
+  stopPoll();
+  const token = ++renderToken;
+  const h = location.hash.replace(/^#/, "") || "veille";
+  document.querySelectorAll("nav a").forEach(a => a.classList.remove("on"));
+  if (h.startsWith("session/")) { $("#nav-historique").classList.add("on"); return viewSession(+h.split("/")[1], token); }
+  if (h === "historique") { $("#nav-historique").classList.add("on"); return viewHistory(token); }
+  $("#nav-veille").classList.add("on");
+  return viewWatch(token);
+}
+window.addEventListener("hashchange", route);
+
+/* ---------- table triable ---------- */
+const sortState = {};
+function table(id, cols, rows, defKey, rowClass) {
+  const st = sortState[id] ||= {key: defKey, dir: -1};
+  const col = cols.find(c => c.key === st.key) || cols[0];
+  const val = r => col.sort ? col.sort(r) : r[col.key];
+  const sorted = [...rows].sort((a, b) => {
+    let x = val(a), y = val(b);
+    if (x == null) return 1; if (y == null) return -1;
+    if (typeof x === "string") return st.dir * x.localeCompare(y, "fr", {sensitivity: "base"});
+    return st.dir * (x - y);
+  });
+  const th = cols.map(c => `<th data-k="${c.key}" class="${c.nosort ? "" : "sortable"} ${c.num ? "n" : ""} ${c.key === st.key ? "sorted" : ""}">${c.label}${c.key === st.key ? `<span class="ar">${st.dir < 0 ? "▼" : "▲"}</span>` : ""}</th>`).join("");
+  const body = sorted.map(r => `<tr class="${rowClass ? rowClass(r) : ""}">${cols.map(c => `<td class="${c.num ? "n" : ""} ${c.cls || ""}">${c.fmt ? c.fmt(r) : esc(r[c.key])}</td>`).join("")}</tr>`).join("");
+  return `<div class="tw" data-table="${id}"><table><thead><tr>${th}</tr></thead><tbody>${body || `<tr><td colspan="${cols.length}" class="empty">Aucune donnée pour l'instant.</td></tr>`}</tbody></table></div>`;
+}
+function bindTables(root, rerender) {
+  root.querySelectorAll("[data-table] th.sortable").forEach(th => th.onclick = () => {
+    const id = th.closest("[data-table]").dataset.table, st = sortState[id], k = th.dataset.k;
+    if (st.key === k) st.dir = -st.dir; else { st.key = k; st.dir = typeof k === "string" && ["brand", "title"].includes(k) ? 1 : -1; }
+    rerender();
+  });
+}
+
+const BRAND_COLS = [
+  {key: "rank", label: "#", num: true, nosort: true, fmt: r => r._rank},
+  {key: "brand", label: "Marque", fmt: r => `<b>${esc(r.brand)}</b>`},
+  {key: "score", label: "Score", num: true, fmt: r => `<span class="score">${nf(r.score, 1)}</span>`},
+  {key: "n_items", label: "Annonces", num: true},
+  {key: "hits", label: "Hits", num: true},
+  {key: "hit_rate", label: "Taux hit", num: true, fmt: r => nf(r.hit_rate, 1) + " %"},
+  {key: "fav_median", label: "Fav. méd.", num: true, fmt: r => nf(r.fav_median, 1)},
+  {key: "fav_mean", label: "Fav. moy.", num: true, fmt: r => nf(r.fav_mean, 1)},
+  {key: "fav_max", label: "Fav. max", num: true},
+  {key: "price_mean", label: "Prix moy.", num: true, fmt: r => eur(r.price_mean)},
+];
+const brandRows = bs => bs.map((b, i) => ({...b, _rank: i + 1}));
+const brandRowClass = r => r.hits > 0 ? "hit" : "";
+
+function measureTag(i) {
+  if (!i.measured) return `<span class="tag p">non mesurée</span>`;
+  if (i.in_progress) return `<span class="tag p">en cours</span>`;
+  if (i.partial) return `<span class="tag p" title="Relevé pris avant la fin de la fenêtre">partielle</span>`;
+  return "";
+}
+function itemCols(win) {
+  return [
+    {key: "photo", label: "", nosort: true, fmt: i => i.photo_url ? `<img loading="lazy" referrerpolicy="no-referrer" src="${esc(i.photo_url)}" alt="">` : ""},
+    {key: "brand", label: "Marque", fmt: i => `<b>${esc(i.brand)}</b>`},
+    {key: "window_fav", label: `Fav. ${win} min`, num: true, fmt: i => `<b>${nf(i.window_fav)}</b> ${i.is_hit ? '<span class="tag hit">HIT</span>' : ""} ${measureTag(i)}`},
+    {key: "price", label: "Prix", num: true, fmt: i => eur(i.price)},
+    {key: "window_age", label: "Relevé à", num: true, fmt: i => i.window_age != null ? nf(i.window_age / 60, 1) + " min" : "–"},
+    {key: "favs_per_min", label: "Fav./min", num: true, fmt: i => nf(i.favs_per_min, 2)},
+    {key: "title", label: "Titre", cls: "title", fmt: i => `<a href="${esc(i.url)}" target="_blank" rel="noopener">${esc(i.title || "Annonce")}</a>`},
+    {key: "last_fav", label: "Fav. dernier", num: true},
+    {key: "last_views", label: "Vues", num: true},
+    {key: "size", label: "Taille"},
+    {key: "posted_at", label: "En ligne", fmt: i => new Date(i.posted_at * 1000).toLocaleTimeString("fr-FR", {hour: "2-digit", minute: "2-digit"})},
+  ];
+}
+
+/* ---------- écran Veille ---------- */
+let lastState = null;
+async function viewWatch(token) {
+  let s;
+  try { s = await api("/api/state"); } catch (e) { $("#app").innerHTML = `<div class="card err">${esc(e.message)}</div>`; return; }
+  if (token !== renderToken) return;
+  lastState = s;
+  $("#navdot").classList.toggle("hidden", !s.running);
+  if (s.running) return renderLive(s, token);
+  renderForm(s);
+}
+
+const FORM_KEY = "vnw-form";
+function savedForm() { try { return JSON.parse(localStorage.getItem(FORM_KEY)) || {}; } catch { return {}; } }
+
+function renderForm(s) {
+  const f = {duration_min: 60, window_min: 10, threshold: 20, interval_s: 60, ...savedForm()};
+  const last = s.session;
+  $("#app").innerHTML = `
+  ${last ? `<div class="notice" style="margin-bottom:16px"><span>Dernière veille <b>#${last.id}</b> · ${esc(last.filters_label)} · <span class="st ${last.status}">${STATUS[last.status] || last.status}</span></span><span class="spacer"></span><a class="btn sm" href="#session/${last.id}">Voir les résultats</a></div>` : ""}
+  <form class="card" id="f" autocomplete="off">
+    <h2>Nouvelle veille</h2>
+    <label for="url">URL de recherche Vinted</label>
+    <input type="url" id="url" placeholder="https://www.vinted.fr/catalog?catalog[]=79&price_from=10&price_to=40" value="${esc(f.url || "")}">
+    <div class="hint">Fais ta recherche filtrée sur vinted.fr puis colle l'URL de la barre d'adresse.</div>
+    <div class="chips" id="parsed"></div>
+    <div class="or">ou en manuel</div>
+    <div class="fields">
+      <div><label for="cat">ID de catégorie</label><input type="text" inputmode="numeric" id="cat" placeholder="ex : 79" value="${esc(f.catalog_id || "")}"></div>
+      <div><label for="pmin">Prix min (€)</label><input type="number" id="pmin" min="0" step="1" value="${esc(f.price_min ?? "")}"></div>
+      <div><label for="pmax">Prix max (€)</label><input type="number" id="pmax" min="0" step="1" value="${esc(f.price_max ?? "")}"></div>
+    </div>
+    <div class="hint">Les champs manuels remplacent ceux de l'URL s'ils sont remplis.</div>
+    <h3 style="margin-top:22px">Paramètres de veille</h3>
+    <div class="fields">
+      <div><label for="dur">Durée de veille (min)</label><input type="number" id="dur" min="1" value="${f.duration_min}"></div>
+      <div><label for="win">Fenêtre de comptage (min)</label><input type="number" id="win" min="1" value="${f.window_min}"></div>
+      <div><label for="thr">Seuil de hit (favoris)</label><input type="number" id="thr" min="1" value="${f.threshold}"></div>
+      <div><label for="int">Intervalle scans (s, min 45)</label><input type="number" id="int" min="45" value="${f.interval_s}"></div>
+    </div>
+    <div class="hint" id="durhint"></div>
+    <div class="row" style="margin-top:20px">
+      <label class="check"><input type="checkbox" id="demo" ${f.demo ? "checked" : ""}><span>Mode démo<br><span class="muted small">Flux simulé, temps accéléré ×60 (1 min = 1 s). Aucun appel à Vinted.</span></span></label>
+      <span class="spacer"></span>
+      <button class="btn" id="go" type="submit">▶ Lancer la veille</button>
+    </div>
+    <div id="ferr"></div>
+  </form>
+  <div class="card small muted">
+    <b style="color:var(--text)">Comment ça marche ?</b> L'app scanne toutes les <i>nouvelles</i> annonces de la recherche,
+    relève leurs favoris à chaque cycle et retient le nombre de favoris pris pendant les <i>X</i> premières minutes.
+    Une annonce qui atteint le seuil est un <span class="chip orange">hit</span>. À la fin, les marques sont classées par
+    score = médiane des favoris × min(annonces, 5)/5 + 2 × hits.
+  </div>`;
+  const form = $("#f");
+  let t;
+  const parse = async () => {
+    const u = $("#url").value.trim();
+    if (!u) { $("#parsed").innerHTML = ""; return; }
+    try {
+      const {filters: p} = await api("/api/parse-url", {method: "POST", body: JSON.stringify({url: u})});
+      const c = [];
+      if (p.catalog_ids.length) c.push(`Catégorie ${p.catalog_ids.join(", ")}`);
+      if (p.search_text) c.push(`« ${esc(p.search_text)} »`);
+      if (p.price_from != null) c.push(`≥ ${nf(p.price_from, 2)} €`);
+      if (p.price_to != null) c.push(`≤ ${nf(p.price_to, 2)} €`);
+      if (p.brand_ids.length) c.push(`${p.brand_ids.length} marque(s)`);
+      if (p.size_ids.length) c.push(`${p.size_ids.length} taille(s)`);
+      if (p.status_ids.length) c.push(`${p.status_ids.length} état(s)`);
+      $("#parsed").innerHTML = c.length ? c.map(x => `<span class="chip">${x}</span>`).join("") : `<span class="chip gray">Aucun filtre reconnu</span>`;
+    } catch { $("#parsed").innerHTML = ""; }
+  };
+  const updHint = () => {
+    const d = +$("#dur").value || 0, w = +$("#win").value || 0, demo = $("#demo").checked;
+    const tot = (d + w) * 60;
+    $("#durhint").textContent = `Durée totale ≈ ${dur(demo ? tot / 60 : tot)}${demo ? " (réels, en démo)" : ""} : ${d} min de captation + ${w} min de fenêtre de fin.`;
+  };
+  $("#url").addEventListener("input", () => { clearTimeout(t); t = setTimeout(parse, 250); });
+  form.addEventListener("input", updHint);
+  parse(); updHint();
+  form.onsubmit = async e => {
+    e.preventDefault();
+    const num = id => $(id).value === "" ? null : Number($(id).value);
+    const body = {
+      url: $("#url").value.trim(), catalog_id: $("#cat").value.trim(),
+      price_min: num("#pmin"), price_max: num("#pmax"),
+      duration_min: num("#dur") ?? 60, window_min: num("#win") ?? 10,
+      threshold: num("#thr") ?? 20, interval_s: Math.max(45, num("#int") ?? 60), demo: $("#demo").checked,
+    };
+    try { localStorage.setItem(FORM_KEY, JSON.stringify(body)); } catch {}
+    $("#go").disabled = true; $("#ferr").innerHTML = "";
+    try { await api("/api/start", {method: "POST", body: JSON.stringify(body)}); route(); }
+    catch (err) { $("#ferr").innerHTML = `<div class="err">${esc(err.message)}</div>`; $("#go").disabled = false; }
+  };
+}
+
+function itemCard(i, n, win) {
+  const age = i.age_min != null ? i.age_min : (i.window_age != null ? i.window_age / 60 : null);
+  return `<a class="it ${i.is_hit ? "hit" : ""}" href="${esc(i.url)}" target="_blank" rel="noopener">
+    <span class="rk">${n}</span>
+    <img loading="lazy" referrerpolicy="no-referrer" src="${esc(i.photo_url)}" alt="">
+    <span class="mid"><span class="t">${esc(i.brand)}</span>
+      <span class="s">${eur(i.price)} · ${age != null ? nf(age, 0) + " min" : "–"}${i.size ? " · " + esc(i.size) : ""}</span>
+      <span class="s">${i.is_hit ? '<span class="tag hit">HIT</span> ' : ""}${measureTag(i)}</span></span>
+    <span class="f"><b>${nf(i.window_fav)}</b><span>fav. ${win} min</span></span></a>`;
+}
+
+function renderLive(s, token) {
+  const se = s.session, win = se.window_min;
+  const capFrac = se.duration_min / (se.duration_min + se.window_min);
+  const capFill = s.phase === "capture" ? s.phase_progress : 1;
+  const winFill = s.phase === "capture" ? 0 : s.phase_progress;
+  const phaseLabel = s.phase === "capture" ? "Captation des nouvelles annonces" : s.phase === "window" ? "Fenêtre de fin — plus de nouvelles annonces, on finit les mesures" : "Finalisation";
+  const speed = s.speed || 1;
+  const nxt = s.next_cycle_in != null ? `Prochain scan dans ${dur(s.next_cycle_in / speed)}` : "Scan en cours…";
+  const lc = s.last_cycle || {};
+  $("#app").innerHTML = `
+  <div class="card">
+    <div class="row" style="margin-bottom:12px">
+      <div><h2 style="margin:0">Veille #${se.id} ${s.demo ? '<span class="chip orange">DÉMO ×60</span>' : ""}</h2>
+      <div class="muted small">${esc(se.filters_label)} · fenêtre ${win} min · hit ≥ ${se.hit_threshold} fav. · scan /${se.interval_s} s</div></div>
+      <span class="spacer"></span>
+      <a class="btn ghost sm" href="#session/${se.id}">Tableau complet</a>
+      <button class="btn danger sm" id="stop">■ Arrêter</button>
+    </div>
+    <div class="phase"><b>${phaseLabel}</b><span class="muted small">reste ${dur(s.remaining_s / speed)}${s.demo ? " (réel)" : ""} · ${Math.round(s.progress * 100)} %</span></div>
+    <div class="track">
+      <div class="seg" style="width:${capFrac * 100}%"><div class="fill" style="width:${capFill * 100}%"></div></div>
+      <div class="seg win" style="width:${(1 - capFrac) * 100}%"><div class="fill" style="width:${winFill * 100}%"></div></div>
+    </div>
+    <div class="legend"><span>Captation ${se.duration_min} min</span><span class="w">Fenêtre de fin ${win} min</span></div>
+    <div class="stats">
+      <div class="stat"><div class="l">Annonces suivies</div><div class="v">${nf(s.n_items)}</div></div>
+      <div class="stat"><div class="l">Hits (≥ ${se.hit_threshold} fav.)</div><div class="v" style="color:var(--hit-line)">${nf(s.n_hits)}</div></div>
+      <div class="stat"><div class="l">Statut API</div><div class="api ${s.api.level}">${esc(s.api.text)}</div></div>
+      <div class="stat"><div class="l">Cycles</div><div class="v">${nf(se.cycles)}</div><div class="small muted">${nxt}${lc.pages ? ` · dernier : ${lc.pages} p., +${lc.new}` : ""}</div></div>
+    </div>
+    ${(s.warnings || []).map(w => `<div class="warnbox">⚠ ${esc(w)}</div>`).join("")}
+  </div>
+  <div class="grid g2">
+    <div class="card"><h2>Top 10 annonces</h2>
+      <div class="items">${s.top_items.length ? s.top_items.map((i, n) => itemCard(i, n + 1, win)).join("") : `<div class="empty">En attente des premières annonces postées après le lancement…</div>`}</div></div>
+    <div class="card"><h2>Top marques</h2><div id="tb"></div></div>
+  </div>`;
+  const drawBrands = () => {
+    const cols = BRAND_COLS.filter(c => ["rank", "brand", "score", "n_items", "hits", "fav_median", "price_mean"].includes(c.key));
+    $("#tb").innerHTML = table("live-brands", cols, brandRows(s.top_brands), "score", brandRowClass);
+    bindTables($("#tb"), drawBrands);
+  };
+  drawBrands();
+  $("#stop").onclick = async () => {
+    if (!confirm("Arrêter la veille ? Les données déjà collectées sont conservées.")) return;
+    $("#stop").disabled = true; $("#stop").textContent = "Arrêt…";
+    await api("/api/stop", {method: "POST"}).catch(() => {});
+    location.hash = `#session/${se.id}`;
+  };
+  pollTimer = setTimeout(() => { if (token === renderToken) viewWatch(token); }, s.demo ? 1500 : 5000);
+}
+
+/* ---------- résultats d'une session ---------- */
+async function viewSession(id, token) {
+  let d;
+  try { d = await api(`/api/sessions/${id}`); } catch (e) {
+    $("#app").innerHTML = `<div class="card"><div class="err">${esc(e.message)}</div><p><a href="#historique">← Historique</a></p></div>`; return; }
+  if (token !== renderToken) return;
+  const s = d.session, win = s.window_min;
+  const hits = d.items.filter(i => i.is_hit).length, partial = d.items.filter(i => i.partial).length;
+  const f = s.filters;
+  $("#app").innerHTML = `
+  <div class="card">
+    <div class="row">
+      <div><a href="#historique" class="small">← Historique</a>
+      <h2 style="margin:4px 0 2px">Veille #${s.id} <span class="st ${s.status}">${STATUS[s.status] || s.status}</span> ${s.demo ? '<span class="chip orange">DÉMO</span>' : ""}</h2>
+      <div class="muted small">${dt(s.created_at)} · ${esc(s.filters_label)}</div></div>
+      <span class="spacer"></span>
+      ${d.live ? `<a class="btn sm" href="#veille">Suivi en direct</a>` : ""}
+      <a class="btn ghost sm" href="/api/sessions/${s.id}/export/brands.csv">⇩ CSV marques</a>
+      <a class="btn ghost sm" href="/api/sessions/${s.id}/export/items.csv">⇩ CSV annonces</a>
+      ${d.live ? "" : `<button class="btn ghost sm" id="del" title="Supprimer">🗑</button>`}
+    </div>
+    <div class="kv">
+      <div><span>Annonces</span><b>${nf(d.items.length)}</b></div>
+      <div><span>Hits ≥ ${s.hit_threshold}</span><b style="color:var(--hit-line)">${nf(hits)}</b></div>
+      <div><span>Marques</span><b>${nf(d.brands.length)}</b></div>
+      <div><span>Durée / fenêtre</span><b>${s.duration_min} / ${win} min</b></div>
+      <div><span>Cycles · requêtes</span><b>${nf(s.cycles)} · ${nf(s.requests)}</b></div>
+      <div><span>Relevés</span><b>${nf(s.n_snapshots)}</b></div>
+    </div>
+    ${f.catalog_ids?.length ? `<div class="chips"><span class="chip gray">catalog : ${f.catalog_ids.join(", ")}</span>${f.brand_ids?.length ? `<span class="chip gray">brand_ids : ${f.brand_ids.join(", ")}</span>` : ""}${f.size_ids?.length ? `<span class="chip gray">size_ids : ${f.size_ids.join(", ")}</span>` : ""}${f.status_ids?.length ? `<span class="chip gray">status_ids : ${f.status_ids.join(", ")}</span>` : ""}</div>` : ""}
+    ${partial ? `<div class="warnbox">${partial} mesure(s) partielle(s) : le dernier relevé a été pris avant la fin des ${win} min (veille arrêtée, pause API…). Les favoris réels sont probablement plus élevés.</div>` : ""}
+    ${(s.warnings || []).map(w => `<div class="warnbox">⚠ ${esc(w)}</div>`).join("")}
+  </div>
+  <div class="card"><h2>Classement des marques</h2><div id="tb"></div>
+    <div class="hint">Score = médiane des favoris × min(annonces, 5)/5 + 2 × hits. Lignes orange = au moins un hit. Clique sur une colonne pour trier.</div></div>
+  <div class="card"><h2>Annonces</h2><div id="ti"></div></div>`;
+  const draw = () => {
+    $("#tb").innerHTML = table("brands", BRAND_COLS, brandRows(d.brands), "score", brandRowClass);
+    $("#ti").innerHTML = table("items", itemCols(win), d.items, "window_fav", i => i.is_hit ? "hit" : "");
+    bindTables($("#app"), draw);
+  };
+  draw();
+  const del = $("#del");
+  if (del) del.onclick = async () => {
+    if (!confirm(`Supprimer définitivement la veille #${s.id} ?`)) return;
+    await api(`/api/sessions/${s.id}`, {method: "DELETE"}).then(() => location.hash = "#historique").catch(e => alert(e.message));
+  };
+  if (d.live) pollTimer = setTimeout(() => { if (token === renderToken) viewSession(id, token); }, s.demo ? 3000 : 10000);
+}
+
+/* ---------- historique ---------- */
+async function viewHistory(token) {
+  const list = await api("/api/sessions").catch(() => []);
+  if (token !== renderToken) return;
+  $("#app").innerHTML = `<div class="card"><h2>Historique des veilles</h2>
+    ${list.length ? `<div class="hist">${list.map(s => `
+      <div class="h card" style="margin:0;box-shadow:none">
+        <div><div class="top"><b>#${s.id}</b><span class="muted small">${dt(s.created_at)}</span>
+          <span class="st ${s.status}">${STATUS[s.status] || s.status}</span>${s.demo ? '<span class="chip orange">DÉMO</span>' : ""}</div>
+          <div style="font-weight:600;margin-top:4px">${esc(s.filters_label)}</div>
+          <div class="meta">${nf(s.n_items)} annonces · ${nf(s.n_hits)} hits · ${s.duration_min} min, fenêtre ${s.window_min} min, seuil ${s.hit_threshold}</div>
+          <div class="chips">${s.top_brands.length ? s.top_brands.map((b, i) => `<span class="chip ${b.hits ? "orange" : ""}">${["🥇", "🥈", "🥉"][i]} ${esc(b.brand)} · ${nf(b.score, 1)}</span>`).join("") : `<span class="chip gray">aucune annonce</span>`}</div></div>
+        <div class="row"><a class="btn sm" href="#session/${s.id}">Voir</a>
+          ${s.status === "running" ? "" : `<button class="btn ghost sm" data-del="${s.id}" title="Supprimer">🗑</button>`}</div>
+      </div>`).join("")}</div>` : `<div class="empty">Aucune veille pour l'instant. <a href="#veille">Lance la première →</a></div>`}
+  </div>`;
+  document.querySelectorAll("[data-del]").forEach(b => b.onclick = async () => {
+    if (!confirm(`Supprimer définitivement la veille #${b.dataset.del} ?`)) return;
+    await api(`/api/sessions/${b.dataset.del}`, {method: "DELETE"}).catch(e => alert(e.message));
+    route();
+  });
+}
+
+route();
+</script>
+</body>
+</html>
