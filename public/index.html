@@ -177,8 +177,14 @@ const dur = s => { s = Math.max(0, Math.round(s)); const h = Math.floor(s / 3600
   return h ? `${h} h ${String(m).padStart(2, "0")}` : m ? `${m} min ${String(ss).padStart(2, "0")}` : `${ss} s`; };
 const STATUS = {running: "En cours", done: "Terminée", stopped: "Arrêtée", interrupted: "Interrompue", error: "Erreur"};
 
+const KEY_STORE = "vnw-key";
+const getKey = () => { try { return localStorage.getItem(KEY_STORE) || ""; } catch { return ""; } };
+const withKey = url => getKey() ? `${url}${url.includes("?") ? "&" : "?"}key=${encodeURIComponent(getKey())}` : url;
+let INFO = {serverless: false};
+
 async function api(path, opts = {}) {
-  const r = await fetch(path, {headers: {"Content-Type": "application/json"}, ...opts});
+  const r = await fetch(path, {...opts, headers: {"Content-Type": "application/json", "X-App-Key": getKey()}});
+  if (r.status === 401) { showLogin(); throw new Error("Mot de passe requis"); }
   const data = await r.json().catch(() => ({}));
   if (!r.ok) {
     let msg = data.detail;
@@ -266,13 +272,39 @@ function itemCols(win) {
 
 /* ---------- écran Veille ---------- */
 let lastState = null;
+
+/* Sur Vercel, rien ne tourne en fond : c'est la page ouverte qui déclenche les scans. */
+let tickInFlight = false;
+function kick() {
+  if (tickInFlight) return;
+  tickInFlight = true;
+  api("/api/tick", {method: "POST"}).catch(() => {}).finally(() => { tickInFlight = false; });
+}
+let wakeLock = null;
+async function keepAwake(on) {
+  try {
+    if (on && !wakeLock && navigator.wakeLock) { wakeLock = await navigator.wakeLock.request("screen"); wakeLock.addEventListener("release", () => wakeLock = null); }
+    if (!on && wakeLock) { await wakeLock.release(); wakeLock = null; }
+  } catch {}
+}
+document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible" && lastState?.running) { keepAwake(true); route(); } });
+
+function showLogin() {
+  stopPoll(); ++renderToken;
+  $("#app").innerHTML = `<form class="card" id="login" style="max-width:420px;margin:40px auto">
+    <h2>Mot de passe</h2><p class="muted small">Cette app est protégée (variable APP_PASSWORD sur Vercel).</p>
+    <input type="text" id="pw" autocomplete="current-password" style="-webkit-text-security:disc" autofocus>
+    <div class="row" style="margin-top:14px"><span class="spacer"></span><button class="btn">Entrer</button></div></form>`;
+  $("#login").onsubmit = e => { e.preventDefault(); try { localStorage.setItem(KEY_STORE, $("#pw").value); } catch {} route(); };
+}
 async function viewWatch(token) {
   let s;
-  try { s = await api("/api/state"); } catch (e) { $("#app").innerHTML = `<div class="card err">${esc(e.message)}</div>`; return; }
+  try { s = await api("/api/state"); } catch (e) { if (token !== renderToken) return; $("#app").innerHTML = `<div class="card err">${esc(e.message)}</div>`; return; }
   if (token !== renderToken) return;
   lastState = s;
   $("#navdot").classList.toggle("hidden", !s.running);
   if (s.running) return renderLive(s, token);
+  keepAwake(false);
   renderForm(s);
 }
 
@@ -306,7 +338,7 @@ function renderForm(s) {
     </div>
     <div class="hint" id="durhint"></div>
     <div class="row" style="margin-top:20px">
-      <label class="check"><input type="checkbox" id="demo" ${f.demo ? "checked" : ""}><span>Mode démo<br><span class="muted small">Flux simulé, temps accéléré ×60 (1 min = 1 s). Aucun appel à Vinted.</span></span></label>
+      <label class="check"><input type="checkbox" id="demo" ${f.demo ? "checked" : ""}><span>Mode démo<br><span class="muted small">Flux simulé, temps accéléré ×30 (1 min = 2 s). Aucun appel à Vinted.</span></span></label>
       <span class="spacer"></span>
       <button class="btn" id="go" type="submit">▶ Lancer la veille</button>
     </div>
@@ -339,7 +371,7 @@ function renderForm(s) {
   const updHint = () => {
     const d = +$("#dur").value || 0, w = +$("#win").value || 0, demo = $("#demo").checked;
     const tot = (d + w) * 60;
-    $("#durhint").textContent = `Durée totale ≈ ${dur(demo ? tot / 60 : tot)}${demo ? " (réels, en démo)" : ""} : ${d} min de captation + ${w} min de fenêtre de fin.`;
+    $("#durhint").textContent = `Durée totale ≈ ${dur(demo ? tot / 30 : tot)}${demo ? " (réels, en démo)" : ""} : ${d} min de captation + ${w} min de fenêtre de fin.`;
   };
   $("#url").addEventListener("input", () => { clearTimeout(t); t = setTimeout(parse, 250); });
   form.addEventListener("input", updHint);
@@ -383,7 +415,7 @@ function renderLive(s, token) {
   $("#app").innerHTML = `
   <div class="card">
     <div class="row" style="margin-bottom:12px">
-      <div><h2 style="margin:0">Veille #${se.id} ${s.demo ? '<span class="chip orange">DÉMO ×60</span>' : ""}</h2>
+      <div><h2 style="margin:0">Veille #${se.id} ${s.demo ? `<span class="chip orange">DÉMO ×${s.speed}</span>` : ""}</h2>
       <div class="muted small">${esc(se.filters_label)} · fenêtre ${win} min · hit ≥ ${se.hit_threshold} fav. · scan /${se.interval_s} s</div></div>
       <span class="spacer"></span>
       <a class="btn ghost sm" href="#session/${se.id}">Tableau complet</a>
@@ -401,6 +433,8 @@ function renderLive(s, token) {
       <div class="stat"><div class="l">Statut API</div><div class="api ${s.api.level}">${esc(s.api.text)}</div></div>
       <div class="stat"><div class="l">Cycles</div><div class="v">${nf(se.cycles)}</div><div class="small muted">${nxt}${lc.pages ? ` · dernier : ${lc.pages} p., +${lc.new}` : ""}</div></div>
     </div>
+    ${s.stalled ? `<div class="warnbox">⏸ Veille en pause : aucun scan récent. ${INFO.serverless ? "Sur Vercel, garde cette page ouverte (écran allumé) ou configure un cron externe (voir README)." : ""}</div>` : ""}
+    ${INFO.serverless && !s.demo ? `<div class="hint" style="margin-top:10px">ℹ Les scans sont déclenchés par cette page tant qu'elle est ouverte${navigator.wakeLock ? " (l'écran reste allumé)" : ""}, ou par ton cron externe.</div>` : ""}
     ${(s.warnings || []).map(w => `<div class="warnbox">⚠ ${esc(w)}</div>`).join("")}
   </div>
   <div class="grid g2">
@@ -420,13 +454,15 @@ function renderLive(s, token) {
     await api("/api/stop", {method: "POST"}).catch(() => {});
     location.hash = `#session/${se.id}`;
   };
-  pollTimer = setTimeout(() => { if (token === renderToken) viewWatch(token); }, s.demo ? 1500 : 5000);
+  kick(); keepAwake(true);
+  pollTimer = setTimeout(() => { if (token === renderToken) viewWatch(token); }, s.demo ? 1000 : 5000);
 }
 
 /* ---------- résultats d'une session ---------- */
 async function viewSession(id, token) {
   let d;
   try { d = await api(`/api/sessions/${id}`); } catch (e) {
+    if (token !== renderToken) return;
     $("#app").innerHTML = `<div class="card"><div class="err">${esc(e.message)}</div><p><a href="#historique">← Historique</a></p></div>`; return; }
   if (token !== renderToken) return;
   const s = d.session, win = s.window_min;
@@ -440,8 +476,8 @@ async function viewSession(id, token) {
       <div class="muted small">${dt(s.created_at)} · ${esc(s.filters_label)}</div></div>
       <span class="spacer"></span>
       ${d.live ? `<a class="btn sm" href="#veille">Suivi en direct</a>` : ""}
-      <a class="btn ghost sm" href="/api/sessions/${s.id}/export/brands.csv">⇩ CSV marques</a>
-      <a class="btn ghost sm" href="/api/sessions/${s.id}/export/items.csv">⇩ CSV annonces</a>
+      <a class="btn ghost sm" href="${withKey(`/api/sessions/${s.id}/export/brands.csv`)}">⇩ CSV marques</a>
+      <a class="btn ghost sm" href="${withKey(`/api/sessions/${s.id}/export/items.csv`)}">⇩ CSV annonces</a>
       ${d.live ? "" : `<button class="btn ghost sm" id="del" title="Supprimer">🗑</button>`}
     </div>
     <div class="kv">
@@ -470,6 +506,7 @@ async function viewSession(id, token) {
     if (!confirm(`Supprimer définitivement la veille #${s.id} ?`)) return;
     await api(`/api/sessions/${s.id}`, {method: "DELETE"}).then(() => location.hash = "#historique").catch(e => alert(e.message));
   };
+  if (d.live) kick();
   if (d.live) pollTimer = setTimeout(() => { if (token === renderToken) viewSession(id, token); }, s.demo ? 3000 : 10000);
 }
 
@@ -496,7 +533,7 @@ async function viewHistory(token) {
   });
 }
 
-route();
+fetch("/api/info").then(r => r.json()).then(i => INFO = i).catch(() => {}).finally(route);
 </script>
 </body>
 </html>

@@ -1,28 +1,30 @@
-"""Stockage SQLite : sessions de veille, annonces suivies et relevés de favoris.
+"""Stockage : Postgres si DATABASE_URL / POSTGRES_URL est défini (Vercel + Neon), sinon SQLite local.
 
 Aucune donnée vendeur n'est stockée : uniquement l'annonce et ses compteurs.
 """
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import statistics
 import threading
-import time
 from pathlib import Path
 
-DB_PATH = Path(__file__).resolve().parent.parent / "data" / "niche_watch.db"
+DB_URL = os.environ.get("DATABASE_URL") or os.environ.get("POSTGRES_URL") or ""
+SQLITE_PATH = Path(__file__).resolve().parent.parent / "data" / "niche_watch.db"
 
-SCHEMA = """
-CREATE TABLE IF NOT EXISTS sessions (
-    id            INTEGER PRIMARY KEY AUTOINCREMENT,
-    created_at    REAL NOT NULL,          -- heure réelle de création (pour l'historique)
-    start_ts      REAL NOT NULL,          -- début de la veille (horloge de la veille)
-    capture_end   REAL NOT NULL,          -- fin de la captation
-    final_end     REAL NOT NULL,          -- fin de la fenêtre de fin
-    ended_at      REAL,
-    status        TEXT NOT NULL,          -- running | done | stopped | interrupted | error
+SESSION_COLS = """
+    created_at    {real} NOT NULL,
+    start_ts      {real} NOT NULL,
+    capture_end   {real} NOT NULL,
+    final_end     {real} NOT NULL,
+    ended_at      {real},
+    status        TEXT NOT NULL,
     demo          INTEGER NOT NULL DEFAULT 0,
+    speed         {real} NOT NULL DEFAULT 1,
+    demo_t0       {real},
+    seed          INTEGER NOT NULL DEFAULT 0,
     filters_json  TEXT NOT NULL,
     filters_label TEXT NOT NULL,
     duration_min  INTEGER NOT NULL,
@@ -31,150 +33,188 @@ CREATE TABLE IF NOT EXISTS sessions (
     interval_s    INTEGER NOT NULL,
     cycles        INTEGER NOT NULL DEFAULT 0,
     requests      INTEGER NOT NULL DEFAULT 0,
-    warnings      TEXT NOT NULL DEFAULT '[]'
-);
-CREATE TABLE IF NOT EXISTS items (
-    session_id   INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-    item_id      INTEGER NOT NULL,
-    title        TEXT,
-    brand        TEXT,
-    price        REAL,
-    currency     TEXT,
-    size         TEXT,
-    condition    TEXT,
-    url          TEXT,
-    photo_url    TEXT,
-    posted_at    REAL NOT NULL,
-    first_seen   REAL NOT NULL,
-    first_age    REAL NOT NULL,
-    last_age     REAL,
-    last_fav     INTEGER,
-    last_views   INTEGER,
-    window_fav   INTEGER,          -- favoris au dernier relevé d'âge <= fenêtre + 60 s
-    window_age   REAL,             -- âge de ce relevé
-    PRIMARY KEY (session_id, item_id)
-);
-CREATE TABLE IF NOT EXISTS snapshots (
-    session_id INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-    item_id    INTEGER NOT NULL,
-    ts         REAL NOT NULL,
-    age_s      REAL NOT NULL,
-    favs       INTEGER NOT NULL,
-    views      INTEGER
-);
-CREATE INDEX IF NOT EXISTS idx_snap ON snapshots(session_id, item_id);
+    next_tick_at  {real} NOT NULL DEFAULT 0,
+    tick_lock     {real},
+    last_cycle_at {real},
+    backoff_i     INTEGER NOT NULL DEFAULT 0,
+    api_level     TEXT NOT NULL DEFAULT 'ok',
+    api_text      TEXT NOT NULL DEFAULT 'Démarrage…',
+    cookies       TEXT,
+    last_cycle    TEXT NOT NULL DEFAULT '{{}}',
+    warnings      TEXT NOT NULL DEFAULT '[]',
+    summary       TEXT
 """
+ITEM_COLS = ["session_id", "item_id", "title", "brand", "price", "currency", "size", "condition", "url",
+             "photo_url", "posted_at", "first_seen", "first_age", "last_age", "last_fav", "last_views",
+             "window_fav", "window_age"]
+
+
+def _schema(pg: bool) -> list[str]:
+    real = "DOUBLE PRECISION" if pg else "REAL"
+    pk = "id BIGSERIAL PRIMARY KEY" if pg else "id INTEGER PRIMARY KEY AUTOINCREMENT"
+    big = "BIGINT" if pg else "INTEGER"
+    return [
+        f"CREATE TABLE IF NOT EXISTS sessions ({pk}, {SESSION_COLS.format(real=real)})",
+        f"""CREATE TABLE IF NOT EXISTS items (
+            session_id {big} NOT NULL, item_id {big} NOT NULL, title TEXT, brand TEXT,
+            price {real}, currency TEXT, size TEXT, condition TEXT, url TEXT, photo_url TEXT,
+            posted_at {real} NOT NULL, first_seen {real} NOT NULL, first_age {real} NOT NULL,
+            last_age {real}, last_fav INTEGER, last_views INTEGER, window_fav INTEGER, window_age {real},
+            PRIMARY KEY (session_id, item_id))""",
+        f"""CREATE TABLE IF NOT EXISTS snapshots (
+            session_id {big} NOT NULL, item_id {big} NOT NULL, ts {real} NOT NULL,
+            age_s {real} NOT NULL, favs INTEGER NOT NULL, views INTEGER)""",
+        "CREATE INDEX IF NOT EXISTS idx_snap ON snapshots(session_id, item_id)",
+    ]
 
 
 class DB:
-    def __init__(self, path: Path = DB_PATH):
-        path.parent.mkdir(parents=True, exist_ok=True)
-        self.conn = sqlite3.connect(str(path), check_same_thread=False)
-        self.conn.row_factory = sqlite3.Row
-        self.conn.execute("PRAGMA journal_mode=WAL")
-        self.conn.execute("PRAGMA foreign_keys=ON")
-        self.conn.executescript(SCHEMA)
+    def __init__(self):
+        self.pg = bool(DB_URL)
         self.lock = threading.RLock()
-        # Une veille "running" au démarrage = le serveur a été coupé pendant la veille.
-        with self.lock, self.conn:
-            self.conn.execute(
-                "UPDATE sessions SET status='interrupted', ended_at=? WHERE status='running'",
-                (time.time(),),
-            )
+        self._conn = None
+        with self.lock:
+            for stmt in _schema(self.pg):
+                self.execute(stmt)
 
-    # ---------- sessions ----------
+    # ------------------------------------------------------------------ bas niveau
+    def _connect(self):
+        if self.pg:
+            import psycopg
+            from psycopg.rows import dict_row
+            return psycopg.connect(DB_URL, autocommit=True, row_factory=dict_row, connect_timeout=15)
+        SQLITE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        c = sqlite3.connect(str(SQLITE_PATH), check_same_thread=False, isolation_level=None)
+        c.row_factory = sqlite3.Row
+        c.execute("PRAGMA journal_mode=WAL")
+        return c
+
+    def _run(self, sql: str, params=(), fetch: str | None = None):
+        if self.pg:
+            sql = sql.replace("?", "%s")
+        with self.lock:
+            for attempt in (1, 2):
+                if self._conn is None:
+                    self._conn = self._connect()
+                try:
+                    cur = self._conn.execute(sql, params)
+                    if fetch == "all":
+                        return [dict(r) for r in cur.fetchall()]
+                    if fetch == "one":
+                        r = cur.fetchone()
+                        return dict(r) if r else None
+                    return cur.rowcount
+                except Exception as e:
+                    # Connexion Postgres coupée (Neon met en veille les connexions inactives) : on retente.
+                    if self.pg and attempt == 1 and _is_conn_error(e):
+                        try:
+                            self._conn.close()
+                        except Exception:
+                            pass
+                        self._conn = None
+                        continue
+                    raise
+
+    def execute(self, sql, params=()) -> int:
+        return self._run(sql, params)
+
+    def all(self, sql, params=()) -> list[dict]:
+        return self._run(sql, params, "all")
+
+    def one(self, sql, params=()) -> dict | None:
+        return self._run(sql, params, "one")
+
+    # ------------------------------------------------------------------ sessions
     def create_session(self, **kw) -> int:
-        kw.setdefault("created_at", time.time())
         kw["filters_json"] = json.dumps(kw.pop("filters"), ensure_ascii=False)
         cols = ",".join(kw)
         q = ",".join("?" for _ in kw)
-        with self.lock, self.conn:
-            cur = self.conn.execute(f"INSERT INTO sessions ({cols}) VALUES ({q})", tuple(kw.values()))
-            return cur.lastrowid
+        return self.one(f"INSERT INTO sessions ({cols}) VALUES ({q}) RETURNING id", tuple(kw.values()))["id"]
 
     def update_session(self, sid: int, **kw):
-        if "warnings" in kw and not isinstance(kw["warnings"], str):
-            kw["warnings"] = json.dumps(kw["warnings"], ensure_ascii=False)
+        for k in ("warnings", "last_cycle", "summary"):
+            if k in kw and kw[k] is not None and not isinstance(kw[k], str):
+                kw[k] = json.dumps(kw[k], ensure_ascii=False)
         sets = ",".join(f"{k}=?" for k in kw)
-        with self.lock, self.conn:
-            self.conn.execute(f"UPDATE sessions SET {sets} WHERE id=?", (*kw.values(), sid))
+        self.execute(f"UPDATE sessions SET {sets} WHERE id=?", (*kw.values(), sid))
+
+    def claim_tick(self, sid: int, real_now: float, clock_now: float) -> bool:
+        """Verrou atomique : un seul scan à la fois, et seulement s'il est dû."""
+        n = self.execute(
+            """UPDATE sessions SET tick_lock=? WHERE id=? AND status='running' AND next_tick_at<=?
+               AND (tick_lock IS NULL OR tick_lock<?)""",
+            (real_now, sid, clock_now, real_now - 90),
+        )
+        return n == 1
 
     def get_session(self, sid: int) -> dict | None:
-        with self.lock:
-            r = self.conn.execute("SELECT * FROM sessions WHERE id=?", (sid,)).fetchone()
+        r = self.one("SELECT * FROM sessions WHERE id=?", (sid,))
+        return _session_dict(r) if r else None
+
+    def running_session(self) -> dict | None:
+        r = self.one("SELECT * FROM sessions WHERE status='running' ORDER BY id DESC LIMIT 1")
+        return _session_dict(r) if r else None
+
+    def latest_session(self) -> dict | None:
+        r = self.one("SELECT * FROM sessions ORDER BY id DESC LIMIT 1")
         return _session_dict(r) if r else None
 
     def list_sessions(self) -> list[dict]:
-        with self.lock:
-            rows = self.conn.execute(
-                """SELECT s.*, (SELECT COUNT(*) FROM items i WHERE i.session_id=s.id) AS n_items
-                   FROM sessions s ORDER BY s.created_at DESC"""
-            ).fetchall()
-        out = []
-        for r in rows:
-            d = _session_dict(r)
-            d["n_items"] = r["n_items"]
-            out.append(d)
-        return out
+        rows = self.all(
+            """SELECT s.*, (SELECT COUNT(*) FROM items i WHERE i.session_id=s.id) AS n_items
+               FROM sessions s ORDER BY s.created_at DESC""")
+        return [_session_dict(r) for r in rows]
 
     def delete_session(self, sid: int):
-        with self.lock, self.conn:
-            self.conn.execute("DELETE FROM snapshots WHERE session_id=?", (sid,))
-            self.conn.execute("DELETE FROM items WHERE session_id=?", (sid,))
-            self.conn.execute("DELETE FROM sessions WHERE id=?", (sid,))
-
-    # ---------- annonces ----------
-    def known_item_ids(self, sid: int) -> set[int]:
         with self.lock:
-            return {r[0] for r in self.conn.execute("SELECT item_id FROM items WHERE session_id=?", (sid,))}
+            self.execute("DELETE FROM snapshots WHERE session_id=?", (sid,))
+            self.execute("DELETE FROM items WHERE session_id=?", (sid,))
+            self.execute("DELETE FROM sessions WHERE id=?", (sid,))
 
-    def record_cycle(self, sid: int, new_items: list[dict], snaps: list[dict], window_s: float):
-        """Insère les nouvelles annonces et les relevés d'un cycle, en une transaction."""
-        limit = window_s + 60
-        with self.lock, self.conn:
-            for it in new_items:
-                self.conn.execute(
-                    """INSERT OR IGNORE INTO items (session_id,item_id,title,brand,price,currency,size,
-                       condition,url,photo_url,posted_at,first_seen,first_age)
-                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                    (sid, it["item_id"], it["title"], it["brand"], it["price"], it["currency"], it["size"],
-                     it["condition"], it["url"], it["photo_url"], it["posted_at"], it["ts"], it["age"]),
-                )
-            for s in snaps:
-                self.conn.execute(
-                    "INSERT INTO snapshots (session_id,item_id,ts,age_s,favs,views) VALUES (?,?,?,?,?,?)",
-                    (sid, s["item_id"], s["ts"], s["age"], s["favs"], s["views"]),
-                )
-                self.conn.execute(
-                    "UPDATE items SET last_age=?, last_fav=?, last_views=? WHERE session_id=? AND item_id=?",
-                    (s["age"], s["favs"], s["views"], sid, s["item_id"]),
-                )
-                if s["age"] <= limit:
-                    # Relevés chronologiques : le dernier relevé <= fenêtre + 60 s l'emporte.
-                    self.conn.execute(
-                        """UPDATE items SET window_fav=?, window_age=?
-                           WHERE session_id=? AND item_id=? AND (window_age IS NULL OR window_age<=?)""",
-                        (s["favs"], s["age"], sid, s["item_id"], s["age"]),
-                    )
-
+    # ------------------------------------------------------------------ annonces
     def items(self, sid: int) -> list[dict]:
-        with self.lock:
-            rows = self.conn.execute("SELECT * FROM items WHERE session_id=?", (sid,)).fetchall()
-        return [dict(r) for r in rows]
+        return self.all("SELECT * FROM items WHERE session_id=?", (sid,))
 
     def snapshot_count(self, sid: int) -> int:
-        with self.lock:
-            return self.conn.execute("SELECT COUNT(*) FROM snapshots WHERE session_id=?", (sid,)).fetchone()[0]
+        return self.one("SELECT COUNT(*) AS n FROM snapshots WHERE session_id=?", (sid,))["n"]
+
+    def upsert_items(self, rows: list[dict]):
+        upd = ",".join(f"{c}=excluded.{c}" for c in
+                       ("last_age", "last_fav", "last_views", "window_fav", "window_age"))
+        for chunk in _chunks(rows, 400):
+            ph = ",".join("(" + ",".join("?" for _ in ITEM_COLS) + ")" for _ in chunk)
+            params = [r.get(c) for r in chunk for c in ITEM_COLS]
+            self.execute(f"INSERT INTO items ({','.join(ITEM_COLS)}) VALUES {ph} "
+                         f"ON CONFLICT (session_id, item_id) DO UPDATE SET {upd}", params)
+
+    def insert_snapshots(self, sid: int, snaps: list[dict]):
+        for chunk in _chunks(snaps, 1000):
+            ph = ",".join("(?,?,?,?,?,?)" for _ in chunk)
+            params = [v for s in chunk for v in (sid, s["item_id"], s["ts"], s["age"], s["favs"], s["views"])]
+            self.execute(f"INSERT INTO snapshots (session_id,item_id,ts,age_s,favs,views) VALUES {ph}", params)
 
 
-def _session_dict(r: sqlite3.Row) -> dict:
+def _chunks(seq, n):
+    for i in range(0, len(seq), n):
+        yield seq[i:i + n]
+
+
+def _is_conn_error(e: Exception) -> bool:
+    name = type(e).__name__
+    return name in ("OperationalError", "InterfaceError") or "closed" in str(e).lower()
+
+
+def _session_dict(r: dict) -> dict:
     d = dict(r)
     d["filters"] = json.loads(d.pop("filters_json"))
-    d["warnings"] = json.loads(d["warnings"] or "[]")
+    d["warnings"] = json.loads(d.get("warnings") or "[]")
+    d["last_cycle"] = json.loads(d.get("last_cycle") or "{}")
+    d["summary"] = json.loads(d["summary"]) if d.get("summary") else None
+    d.pop("cookies", None)  # jamais renvoyé à l'interface
     return d
 
 
-# ---------- calculs ----------
+# ---------------------------------------------------------------------- calculs
 def enrich_items(items: list[dict], window_min: int, threshold: int, now: float | None = None) -> list[dict]:
     """Ajoute à chaque annonce : favoris fenêtre, statut partiel / en cours, hit."""
     w = window_min * 60

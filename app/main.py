@@ -1,8 +1,10 @@
 """Vinted Niche Watch — serveur FastAPI (API + page unique)."""
 from __future__ import annotations
 
+import asyncio
 import csv
 import hashlib
+import hmac
 import io
 import logging
 import os
@@ -14,20 +16,32 @@ from datetime import datetime
 from html import escape
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse, Response
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel, Field
 
-from . import vinted
+from . import tracker, vinted
 from .db import DB, brand_stats, enrich_items
-from .tracker import MIN_INTERVAL, Tracker
+from .tracker import MIN_INTERVAL
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
-STATIC = Path(__file__).resolve().parent.parent / "static"
+PUBLIC = Path(__file__).resolve().parent.parent / "public"
 PORT = int(os.environ.get("VNW_PORT", "8000"))
+SERVERLESS = bool(os.environ.get("VERCEL"))
+APP_PASSWORD = os.environ.get("APP_PASSWORD", "")
+CRON_SECRET = os.environ.get("CRON_SECRET", "")
 
-db = DB()
-tracker: Tracker | None = None
+CONFIG_ERROR = ""
+db: DB | None = None
+if SERVERLESS and not (os.environ.get("DATABASE_URL") or os.environ.get("POSTGRES_URL")):
+    CONFIG_ERROR = ("Aucune base de données : dans Vercel, onglet Storage, crée une base Postgres (Neon), "
+                    "connecte-la au projet, puis redéploie.")
+else:
+    try:
+        db = DB()
+    except Exception as e:  # base injoignable / identifiants faux
+        logging.exception("DB")
+        CONFIG_ERROR = f"Connexion à la base impossible : {type(e).__name__}: {e}"
 
 
 def lan_ip() -> str | None:
@@ -39,21 +53,59 @@ def lan_ip() -> str | None:
         return None
 
 
+async def local_loop():
+    """En local (start.bat), la veille avance toute seule, même page fermée."""
+    while True:
+        try:
+            await asyncio.to_thread(tracker.tick, db)
+        except Exception:
+            logging.exception("tick")
+        run = db.running_session()
+        await asyncio.sleep(1 if run and run["demo"] else 5)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global tracker
-    tracker = Tracker(db)
-    ip = lan_ip()
-    print(f"\n  Vinted Niche Watch : http://localhost:{PORT}")
-    if ip:
-        print(f"  Depuis ton téléphone (même Wi-Fi) : http://{ip}:{PORT}\n")
-    if os.environ.get("VNW_OPEN_BROWSER") == "1":
-        threading.Timer(1.0, lambda: webbrowser.open(f"http://localhost:{PORT}")).start()
+    task = None
+    if not SERVERLESS:
+        task = asyncio.create_task(local_loop())
+        ip = lan_ip()
+        print(f"\n  Vinted Niche Watch : http://localhost:{PORT}")
+        if ip:
+            print(f"  Depuis ton téléphone (même Wi-Fi) : http://{ip}:{PORT}\n")
+        if os.environ.get("VNW_OPEN_BROWSER") == "1":
+            threading.Timer(1.0, lambda: webbrowser.open(f"http://localhost:{PORT}")).start()
     yield
-    await tracker.stop()
+    if task:
+        task.cancel()
 
 
 app = FastAPI(title="Vinted Niche Watch", lifespan=lifespan)
+
+
+def _authorized(request: Request) -> bool:
+    if not APP_PASSWORD:
+        return True
+    key = request.headers.get("x-app-key") or request.query_params.get("key") or ""
+    if key and hmac.compare_digest(key, APP_PASSWORD):
+        return True
+    auth = request.headers.get("authorization", "")
+    return bool(CRON_SECRET and hmac.compare_digest(auth, f"Bearer {CRON_SECRET}"))
+
+
+@app.middleware("http")
+async def password_guard(request: Request, call_next):
+    if CONFIG_ERROR and not request.url.path.startswith("/demo-photo"):
+        if request.url.path.startswith("/api/"):
+            return JSONResponse({"detail": CONFIG_ERROR}, status_code=503)
+        return Response(f"<!doctype html><meta charset=utf-8><meta name=viewport content='width=device-width'>"
+                        f"<body style='font:16px system-ui;max-width:560px;margin:60px auto;padding:0 16px'>"
+                        f"<h2 style='color:#09827e'>Vinted Niche Watch : configuration à terminer</h2>"
+                        f"<p>{escape(CONFIG_ERROR)}</p><p>Voir le README, section Vercel.</p>",
+                        media_type="text/html", status_code=503)
+    if request.url.path.startswith("/api/") and request.url.path != "/api/info" and not _authorized(request):
+        return JSONResponse({"detail": "Mot de passe requis"}, status_code=401)
+    return await call_next(request)
 
 
 class StartBody(BaseModel):
@@ -74,12 +126,13 @@ class UrlBody(BaseModel):
 
 @app.get("/")
 def index():
-    return FileResponse(STATIC / "index.html", headers={"Cache-Control": "no-cache"})
+    return FileResponse(PUBLIC / "index.html", headers={"Cache-Control": "no-cache"})
 
 
 @app.get("/api/info")
 def info():
-    return {"lan_url": f"http://{lan_ip()}:{PORT}" if lan_ip() else None, "min_interval": MIN_INTERVAL}
+    return {"serverless": SERVERLESS, "auth_required": bool(APP_PASSWORD), "min_interval": MIN_INTERVAL,
+            "database": "postgres" if db.pg else "sqlite"}
 
 
 @app.post("/api/parse-url")
@@ -111,34 +164,43 @@ def build_filters(b: StartBody) -> dict:
 
 
 @app.post("/api/start")
-async def start(body: StartBody):
-    if tracker.running:
-        raise HTTPException(409, "Une veille est déjà en cours. Arrête-la d'abord.")
+def start(body: StartBody):
     f = build_filters(body)
-    sid = await tracker.start(f, body.duration_min, body.window_min, body.threshold,
-                              body.interval_s, body.demo)
+    try:
+        sid = tracker.start(db, f, body.duration_min, body.window_min, body.threshold, body.interval_s, body.demo)
+    except tracker.Busy as e:
+        raise HTTPException(409, str(e))
     return {"session_id": sid}
 
 
 @app.post("/api/stop")
-async def stop():
-    await tracker.stop()
+def stop():
+    tracker.stop(db)
     return {"ok": True}
+
+
+@app.api_route("/api/tick", methods=["GET", "POST"])
+def tick():
+    """Fait avancer la veille d'un scan si besoin. Appelé par la page ouverte ou par un cron externe."""
+    return tracker.tick(db)
 
 
 @app.get("/api/state")
 def state():
-    return tracker.state()
+    return tracker.state(db)
 
 
 @app.get("/api/sessions")
 def sessions():
     out = []
     for s in db.list_sessions():
-        items = enrich_items(db.items(s["id"]), s["window_min"], s["hit_threshold"])
-        brands = brand_stats(items)
-        s["n_hits"] = sum(1 for i in items if i["is_hit"])
-        s["top_brands"] = [{"brand": b["brand"], "score": b["score"], "hits": b["hits"]} for b in brands[:3]]
+        summ = s.get("summary")
+        if not summ:  # veille en cours : calcul à la volée
+            items = enrich_items(db.items(s["id"]), s["window_min"], s["hit_threshold"])
+            brands = brand_stats(items)
+            summ = {"n_hits": sum(1 for i in items if i["is_hit"]),
+                    "top_brands": [{"brand": b["brand"], "score": b["score"], "hits": b["hits"]} for b in brands[:3]]}
+        s.update(summ)
         out.append(s)
     return out
 
@@ -152,8 +214,8 @@ def _session_or_404(sid: int) -> dict:
 
 def _session_data(sid: int):
     s = _session_or_404(sid)
-    live = tracker.running and tracker.sid == sid
-    now = tracker.clock.now() if live else None
+    live = s["status"] == "running"
+    now = tracker.clock_now(s) if live else None
     items = enrich_items(db.items(sid), s["window_min"], s["hit_threshold"], now)
     items.sort(key=lambda i: (i["window_fav"] if i["window_fav"] is not None else -1), reverse=True)
     return s, items, brand_stats(items), live
@@ -169,7 +231,7 @@ def session_detail(sid: int):
 @app.delete("/api/sessions/{sid}")
 def session_delete(sid: int):
     _session_or_404(sid)
-    if tracker.running and tracker.sid == sid:
+    if db.get_session(sid)["status"] == "running":
         raise HTTPException(409, "Impossible de supprimer la veille en cours.")
     db.delete_session(sid)
     return {"ok": True}

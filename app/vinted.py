@@ -4,8 +4,6 @@ from __future__ import annotations
 import math
 import random
 import re
-import threading
-import time
 from urllib.parse import parse_qs, urlparse
 
 BASE = "https://www.vinted.fr"
@@ -145,27 +143,35 @@ def normalize_item(raw: dict) -> dict | None:
 
 # ---------------------------------------------------------------- client réel
 class VintedClient:
-    """Client synchrone (appelé dans un thread par le tracker)."""
+    """Client synchrone. Les cookies sont sauvegardés en base entre deux scans (serverless)."""
 
     demo = False
 
-    def __init__(self):
+    def __init__(self, cookies: dict | None = None):
         from curl_cffi import requests as creq
 
-        self._creq = creq
         self.session = creq.Session(impersonate="chrome")
         self.session.headers.update({
             "Accept": "application/json, text/plain, */*",
             "Accept-Language": "fr-FR,fr;q=0.9,en;q=0.8",
             "Referer": BASE + "/catalog",
         })
-        self._lock = threading.Lock()
         self.warmed = False
+        if cookies:
+            for k, v in cookies.items():
+                self.session.cookies.set(k, v, domain=".vinted.fr")
+            self.warmed = True
+
+    def export_cookies(self) -> dict:
+        try:
+            return {c.name: c.value for c in self.session.cookies.jar}
+        except Exception:
+            return dict(self.session.cookies)
 
     def warmup(self):
         """Appelle la page d'accueil pour récupérer les cookies (access_token_web…)."""
         try:
-            r = self.session.get(BASE + "/", timeout=30)
+            r = self.session.get(BASE + "/", timeout=20)
         except Exception as e:
             raise ApiError(f"Erreur réseau (page d'accueil) : {e}") from e
         if r.status_code in (403, 429):
@@ -173,28 +179,27 @@ class VintedClient:
         self.warmed = True
 
     def fetch_page(self, filters: dict, page: int) -> list[dict]:
-        with self._lock:
-            if not self.warmed:
+        if not self.warmed:
+            self.warmup()
+        for attempt in (1, 2):
+            try:
+                r = self.session.get(API, params=api_params(filters, page), timeout=20)
+            except Exception as e:  # réseau
+                raise ApiError(f"Erreur réseau : {e}") from e
+            if r.status_code == 401 and attempt == 1:
+                self.session.cookies.clear()
                 self.warmup()
-            for attempt in (1, 2):
-                try:
-                    r = self.session.get(API, params=api_params(filters, page), timeout=30)
-                except Exception as e:  # réseau
-                    raise ApiError(f"Erreur réseau : {e}") from e
-                if r.status_code == 401 and attempt == 1:
-                    self.session.cookies.clear()
-                    self.warmup()
-                    continue
-                if r.status_code in (403, 429):
-                    raise RateLimited(r.status_code)
-                if r.status_code != 200:
-                    raise ApiError(f"HTTP {r.status_code}")
-                try:
-                    data = r.json()
-                except Exception as e:
-                    raise ApiError("Réponse non JSON") from e
-                return data.get("items") or []
-            raise ApiError("401 persistant malgré le rafraîchissement des cookies")
+                continue
+            if r.status_code in (403, 429):
+                raise RateLimited(r.status_code)
+            if r.status_code != 200:
+                raise ApiError(f"HTTP {r.status_code}")
+            try:
+                data = r.json()
+            except Exception as e:
+                raise ApiError("Réponse non JSON") from e
+            return data.get("items") or []
+        raise ApiError("401 persistant malgré le rafraîchissement des cookies")
 
 
 # ---------------------------------------------------------------- mode démo
@@ -206,52 +211,56 @@ DEMO_BRANDS = [
     ("Zara", 0.25, 15, 12), ("H&M", 0.15, 9, 12), ("Shein", 0.08, 6, 8),
     ("Stone Island", 2.9, 140, 2), ("Kiabi", 0.05, 5, 5), ("", 0.2, 12, 6),
 ]
-DEMO_SPEED = 60.0  # 1 minute simulée = 1 seconde réelle
+DEMO_SPEED = 30.0   # 1 minute simulée = 2 secondes réelles
+DEMO_RATE = 8.0     # annonces / minute simulée
 
 
 class DemoClient:
-    """Imite /api/v2/catalog/items : flux d'annonces généré, temps accéléré."""
+    """Imite /api/v2/catalog/items. Flux déterministe (même graine = mêmes annonces) :
+    rien à garder en mémoire entre deux scans, compatible serverless."""
 
     demo = True
 
-    def __init__(self, clock, filters: dict, rate_per_min: float = 8.0, seed: int | None = None):
-        self.clock = clock
+    def __init__(self, now: float, filters: dict, seed: int, request_no: int = 0):
+        self.now = now
         self.filters = filters
-        self.rng = random.Random(seed)
-        self.rate = rate_per_min
-        self.items: list[dict] = []  # trié du plus ancien au plus récent
-        self.next_id = 4_000_000_000 + self.rng.randint(0, 10_000_000)
-        self.calls = 0
-        self.warmed = True
-        now = clock.now()
-        self._gen_until = now - 40 * 60  # historique de 40 min avant le lancement
-        self._generate(now)
+        self.seed = seed
+        self.request_no = request_no
 
-    def _generate(self, until: float):
-        t = self._gen_until
-        weights = [b[3] for b in DEMO_BRANDS]
-        pf, pt = self.filters.get("price_from"), self.filters.get("price_to")
+    def export_cookies(self) -> dict:
+        return {}
+
+    def _bucket(self, b: int) -> list[dict]:
+        """Annonces postées pendant la minute simulée n° b."""
+        rng = random.Random(f"{self.seed}:{b}")
+        n = 0
+        L, p = math.exp(-DEMO_RATE), 1.0  # tirage de Poisson
         while True:
-            t += self.rng.expovariate(self.rate / 60)
-            if t > until:
+            p *= rng.random()
+            if p <= L:
                 break
-            brand, heat, pmean, _ = self.rng.choices(DEMO_BRANDS, weights)[0]
-            price = round(max(1, self.rng.lognormvariate(math.log(pmean), 0.45)), 0)
+            n += 1
+        weights = [x[3] for x in DEMO_BRANDS]
+        pf, pt = self.filters.get("price_from"), self.filters.get("price_to")
+        out = []
+        for k in range(n):
+            brand, heat, pmean, _ = rng.choices(DEMO_BRANDS, weights)[0]
+            price = round(max(1, rng.lognormvariate(math.log(pmean), 0.45)), 0)
             if pf is not None:
                 price = max(price, pf)
             if pt is not None:
                 price = min(price, pt)
-            self.next_id += self.rng.randint(1, 40)
-            self.items.append({
-                "id": self.next_id, "brand": brand, "price": price, "ts": t,
-                "q": self.rng.lognormvariate(0, 0.6), "heat": heat,
-                "title": f"{brand or 'Pièce'} – {self.rng.choice(['Sweat', 'Veste', 'Hoodie', 'Pull', 'Polaire', 'T-shirt'])}",
-                "size": self.rng.choice(["XS", "S", "M", "L", "XL"]),
+            out.append({
+                "id": 4_000_000_000 + (self.seed % 100_000) * 10_000 + (b % 1000) * 10 + k,
+                "brand": brand, "price": price, "ts": b * 60 + rng.random() * 60,
+                "q": rng.lognormvariate(0, 0.6), "heat": heat,
+                "title": f"{brand or 'Pièce'} – {rng.choice(['Sweat', 'Veste', 'Hoodie', 'Pull', 'Polaire', 'T-shirt'])}",
+                "size": rng.choice(["XS", "S", "M", "L", "XL"]),
             })
-        self._gen_until = until
+        return sorted(out, key=lambda i: i["ts"], reverse=True)
 
-    def _raw(self, it: dict, now: float) -> dict:
-        age_min = max(0.0, (now - it["ts"]) / 60)
+    def _raw(self, it: dict) -> dict:
+        age_min = max(0.0, (self.now - it["ts"]) / 60)
         tau = 12.0
         favs = int(it["heat"] * it["q"] * tau * (1 - math.exp(-age_min / tau)))
         views = int(favs * 7 + age_min * 4 * (0.5 + it["q"]))
@@ -266,37 +275,15 @@ class DemoClient:
         }
 
     def fetch_page(self, filters: dict, page: int) -> list[dict]:
-        self.calls += 1
-        # Un 429 simulé une fois, pour tester l'affichage du backoff.
-        if self.calls == 25:
+        self.request_no += 1
+        if self.request_no == 25:  # un 429 simulé, pour tester l'affichage du backoff
             raise RateLimited(429)
-        now = self.clock.now()
-        self._generate(now)
-        newest = self.items[::-1]
-        chunk = newest[(page - 1) * PER_PAGE: page * PER_PAGE]
-        return [self._raw(it, now) for it in chunk]
-
-
-# ---------------------------------------------------------------- horloges
-class RealClock:
-    speed = 1.0
-
-    def now(self) -> float:
-        return time.time()
-
-    async def sleep(self, seconds: float):
-        import asyncio
-        await asyncio.sleep(seconds)
-
-
-class DemoClock:
-    def __init__(self, speed: float = DEMO_SPEED):
-        self.speed = speed
-        self.t0 = time.time()
-
-    def now(self) -> float:
-        return self.t0 + (time.time() - self.t0) * self.speed
-
-    async def sleep(self, seconds: float):
-        import asyncio
-        await asyncio.sleep(seconds / self.speed)
+        need = page * PER_PAGE
+        found: list[dict] = []
+        b = int(self.now // 60)
+        for _ in range(240):
+            found += [i for i in self._bucket(b) if i["ts"] <= self.now]
+            if len(found) >= need:
+                break
+            b -= 1
+        return [self._raw(i) for i in found[(page - 1) * PER_PAGE: need]]

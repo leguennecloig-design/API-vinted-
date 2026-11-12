@@ -1,6 +1,6 @@
 # Vinted Niche Watch
 
-Petite app locale qui surveille les **nouvelles annonces** d'une recherche Vinted, mesure combien de
+Petite app (en local sur ton PC **ou** en ligne sur Vercel) qui surveille les **nouvelles annonces** d'une recherche Vinted, mesure combien de
 favoris chacune prend dans ses *X* premières minutes, puis classe les annonces et surtout les **marques**.
 
 ## Installation et lancement (Windows)
@@ -12,12 +12,42 @@ favoris chacune prend dans ses *X* premières minutes, puis classe les annonces 
    - Le serveur démarre et le navigateur s'ouvre sur <http://localhost:8000>.
 3. Pour arrêter : ferme la fenêtre noire (ou `Ctrl+C`).
 
-Les données sont stockées dans `data/niche_watch.db` (SQLite). Supprimer ce fichier = repartir de zéro.
+En local, les données sont stockées dans `data/niche_watch.db` (SQLite). Supprimer ce fichier = repartir de zéro.
 
 ### Depuis ton téléphone
 La fenêtre de `start.bat` affiche une adresse du type `http://192.168.1.23:8000` : ouvre-la sur ton
 téléphone connecté **au même Wi-Fi**. Si ça ne charge pas, autorise Python quand le pare-feu Windows
 le demande (réseau **privé**), ou relance `start.bat` après avoir accepté.
+
+## Mise en ligne sur Vercel
+
+1. **Projet** : sur vercel.com, *Add New › Project*, importe ce dépôt GitHub. Aucun réglage de build :
+   Vercel détecte FastAPI tout seul (`app/main.py`).
+2. **Base de données** (obligatoire, Vercel n'a pas de disque) : onglet **Storage › Create Database ›
+   Neon (Postgres)**, offre gratuite, puis **Connect** au projet. La variable `DATABASE_URL` est ajoutée
+   automatiquement. Les tables se créent au premier lancement.
+3. **Mot de passe** (fortement conseillé, l'URL est publique) : *Settings › Environment Variables*,
+   ajoute `APP_PASSWORD` = ton mot de passe. L'app le demandera une fois par appareil.
+4. **Redeploy** (onglet Deployments › ⋯ › Redeploy) pour prendre en compte les variables.
+
+Sans base connectée, la page affiche « configuration à terminer » au lieu de planter.
+
+### Comment la veille tourne sur Vercel
+Vercel n'exécute rien en tâche de fond : chaque scan est déclenché par un appel à `/api/tick`.
+- **Page ouverte** : tant que l'écran de veille est ouvert (PC ou téléphone), il déclenche les scans
+  (et garde l'écran du téléphone allumé). Si tu fermes la page, la veille se met en pause.
+- **Cron externe (recommandé pour fermer la page)** : crée un compte gratuit sur
+  [cron-job.org](https://cron-job.org), tâche **toutes les minutes** sur
+  `https://TON-PROJET.vercel.app/api/tick?key=TON_MOT_DE_PASSE`.
+  (Les crons Vercel du plan gratuit ne tournent qu'une fois par jour : inutilisables ici.)
+  Tu peux aussi définir `CRON_SECRET` et envoyer l'en-tête `Authorization: Bearer <CRON_SECRET>`.
+
+Un scan ne se fait jamais en double, même avec plusieurs pages ouvertes + le cron.
+Une veille qui ne reçoit plus aucun scan 5 min après sa fin est clôturée automatiquement.
+
+⚠ **Vinted bloque souvent les IP des hébergeurs** (Vercel = datacenter). Si le statut API reste sur
+« HTTP 403 », la version Vercel ne pourra pas interroger Vinted : utilise alors la version locale
+(`start.bat`), qui passe par ta connexion. Le mode démo, lui, marche partout.
 
 ## Utilisation
 
@@ -45,8 +75,8 @@ Si tu filtres dans la recherche, l'URL contient `catalog[]=79` → même ID.
 - **Score marque** = médiane des favoris × min(nb d'annonces, 5)/5 + 2 × hits.
 
 ## Mode démo
-Coche **« Mode démo »** avant de lancer : flux d'annonces simulé, temps accéléré ×60 (1 min = 1 s),
-aucun appel à Vinted. Pratique pour tester l'interface (une veille de 60 min dure ~70 s).
+Coche **« Mode démo »** avant de lancer : flux d'annonces simulé, temps accéléré ×30 (1 min = 2 s),
+aucun appel à Vinted. Pratique pour tester l'interface (une veille de 60 min dure ~2 min 20).
 
 ## Bon à savoir
 - Les appels Vinted passent par le serveur Python (`curl_cffi`, empreinte Chrome). En cas de blocage
@@ -56,10 +86,10 @@ aucun appel à Vinted. Pratique pour tester l'interface (une veille de 60 min du
 
 ## Structure
 ```
-app/main.py      serveur FastAPI (API, exports CSV)
+app/main.py      serveur FastAPI (API, mot de passe, exports CSV)
 app/vinted.py    appels Vinted, lecture d'URL, flux démo
-app/tracker.py   boucle de veille en tâche de fond
-app/db.py        SQLite + calculs (marques, hits)
-static/index.html  interface (une seule page)
+app/tracker.py   veille : un « tick » = un scan, état 100 % en base
+app/db.py        Postgres (Vercel) ou SQLite (local) + calculs
+public/index.html  interface (une seule page)
 start.bat        installation + lancement
 ```
