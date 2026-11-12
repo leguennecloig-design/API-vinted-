@@ -151,68 +151,84 @@ def _warn(db: DB, s: dict, msg: str):
         db.update_session(s["id"], warnings=s["warnings"])
 
 
+def scan_pages(client, filters: dict, start_ts: float, cutoff: float, now_fn, sleep_fn,
+               out: list, meta: dict, warn) -> None:
+    """Pagine du plus récent au plus ancien et remplit `out` (annonces normalisées + âge).
+
+    S'arrête dès qu'on atteint des annonces plus vieilles que `cutoff` (fenêtre + 2 min) ou
+    antérieures au début de la veille. `out` est rempli même si une exception interrompt le scan.
+    """
+    seen: set[int] = set()
+    t0 = time.time()
+    for page in range(1, MAX_PAGES + 1):
+        meta["requests"] = meta.get("requests", 0) + 1
+        raw = client.fetch_page(filters, page)
+        meta["pages"] = page
+        now = now_fn()
+        items = [it for it in (vinted.normalize_item(r) for r in raw) if it]
+        for it in items:
+            if it["item_id"] in seen:
+                continue
+            seen.add(it["item_id"])
+            out.append({**it, "age": now - it["posted_at"], "seen_at": now})
+        # Condition d'arrêt sur la dernière annonce non sponsorisée de la page.
+        ordered = [i for i in items if not i["promoted"]] or items
+        if len(raw) < vinted.PER_PAGE or not ordered:
+            return
+        last = ordered[-1]
+        if now - last["posted_at"] > cutoff or last["posted_at"] < start_ts:
+            return
+        if page == MAX_PAGES:
+            warn(f"Limite de {MAX_PAGES} pages atteinte : catégorie trop active, "
+                 "certaines annonces ont pu manquer des relevés. Resserre les filtres.")
+            return
+        if time.time() - t0 > TICK_BUDGET_S:
+            warn("Scan coupé faute de temps (limite serverless) : resserre les filtres.")
+            return
+        sleep_fn(random.uniform(0.8, 1.8))
+
+
 def _cycle(db: DB, s: dict, client, upd: dict):
     W = s["window_min"] * 60
-    cutoff = W + 120  # on pagine jusqu'à fenêtre + 2 min
     existing = {r["item_id"]: r for r in db.items(s["id"])}
     rows: dict[int, dict] = {}
     snaps: list[dict] = []
+    seen: list[dict] = []
+    meta = {"requests": s["requests"], "pages": 0}
     t0 = time.time()
-    pages = new = 0
-    requests = s["requests"]
+    new = 0
+    completed = False
     try:
-        for page in range(1, MAX_PAGES + 1):
-            requests += 1
-            raw = client.fetch_page(s["filters"], page)
-            pages = page
-            now = clock_now(s)
-            items = [it for it in (vinted.normalize_item(r) for r in raw) if it]
-            for it in items:
-                iid = it["item_id"]
-                if iid in rows:
-                    continue
-                age = now - it["posted_at"]
-                row = existing.get(iid)
-                if row is None:
-                    # Uniquement les annonces postées pendant la captation.
-                    if not (s["start_ts"] <= it["posted_at"] <= s["capture_end"]):
-                        continue
-                    row = {c: it.get(c) for c in ("title", "brand", "price", "currency", "size",
-                                                    "condition", "url", "photo_url", "posted_at")}
-                    row.update(session_id=s["id"], item_id=iid, first_seen=now, first_age=age,
-                               window_fav=None, window_age=None)
-                    new += 1
-                else:
-                    row = dict(row)
-                row.update(last_age=age, last_fav=it["favs"], last_views=it["views"])
-                # Favoris fenêtre = dernier relevé d'âge <= fenêtre + 60 s.
-                if age <= W + 60 and (row["window_age"] is None or age >= row["window_age"]):
-                    row.update(window_fav=it["favs"], window_age=age)
-                rows[iid] = row
-                snaps.append({"item_id": iid, "ts": now, "age": age, "favs": it["favs"], "views": it["views"]})
-            # Condition d'arrêt sur la dernière annonce non sponsorisée de la page.
-            ordered = [i for i in items if not i["promoted"]] or items
-            if len(raw) < vinted.PER_PAGE or not ordered:
-                break
-            last = ordered[-1]
-            if now - last["posted_at"] > cutoff or last["posted_at"] < s["start_ts"]:
-                break
-            if page == MAX_PAGES:
-                _warn(db, s, f"Limite de {MAX_PAGES} pages atteinte : catégorie trop active, "
-                             "certaines annonces ont pu manquer des relevés. Resserre les filtres.")
-                break
-            if time.time() - t0 > TICK_BUDGET_S:
-                _warn(db, s, "Scan coupé faute de temps (limite serverless) : resserre les filtres.")
-                break
-            _sleep(s, random.uniform(0.8, 1.8))
+        scan_pages(client, s["filters"], s["start_ts"], W + 120, lambda: clock_now(s),
+                   lambda sec: _sleep(s, sec), seen, meta, lambda m: _warn(db, s, m))
         completed = True
     finally:
+        for it in seen:
+            iid, age, now = it["item_id"], it["age"], it["seen_at"]
+            row = existing.get(iid)
+            if row is None:
+                # Uniquement les annonces postées pendant la captation.
+                if not (s["start_ts"] <= it["posted_at"] <= s["capture_end"]):
+                    continue
+                row = {c: it.get(c) for c in ("title", "brand", "price", "currency", "size",
+                                                "condition", "url", "photo_url", "posted_at")}
+                row.update(session_id=s["id"], item_id=iid, first_seen=now, first_age=age,
+                           window_fav=None, window_age=None)
+                new += 1
+            else:
+                row = dict(row)
+            row.update(last_age=age, last_fav=it["favs"], last_views=it["views"])
+            # Favoris fenêtre = dernier relevé d'âge <= fenêtre + 60 s.
+            if age <= W + 60 and (row["window_age"] is None or age >= row["window_age"]):
+                row.update(window_fav=it["favs"], window_age=age)
+            rows[iid] = row
+            snaps.append({"item_id": iid, "ts": now, "age": age, "favs": it["favs"], "views": it["views"]})
         if rows:
             db.upsert_items(list(rows.values()))
         if snaps:
             db.insert_snapshots(s["id"], snaps)
-        upd["requests"] = requests
-        upd["last_cycle"] = {"pages": pages, "new": new, "snaps": len(snaps),
+        upd["requests"] = meta["requests"]
+        upd["last_cycle"] = {"pages": meta["pages"], "new": new, "snaps": len(snaps),
                              "duration_s": round(time.time() - t0, 1), "at": clock_now(s)}
     if completed:
         at = clock_now(s)

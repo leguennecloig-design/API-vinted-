@@ -183,6 +183,10 @@ const withKey = url => getKey() ? `${url}${url.includes("?") ? "&" : "?"}key=${e
 let INFO = {serverless: false};
 
 async function api(path, opts = {}) {
+  if (INFO.storage === "browser") { const res = await localRoute(path, opts); if (res !== undefined) return res; }
+  return serverApi(path, opts);
+}
+async function serverApi(path, opts = {}) {
   const r = await fetch(path, {...opts, headers: {"Content-Type": "application/json", "X-App-Key": getKey()}});
   if (r.status === 401) { showLogin(); throw new Error("Mot de passe requis"); }
   const data = await r.json().catch(() => ({}));
@@ -192,6 +196,265 @@ async function api(path, opts = {}) {
     throw new Error(msg || `Erreur ${r.status}`);
   }
   return data;
+}
+
+/* ====================================================================================
+   MODE NAVIGATEUR (Vercel sans base de données)
+   Le serveur ne fait que les appels Vinted (/api/scan). Le suivi des annonces, les calculs
+   et l'historique sont gérés ici et stockés dans IndexedDB (sur cet appareil uniquement).
+   Même logique que app/tracker.py.
+   ==================================================================================== */
+const IDB = (() => {
+  let dbp = null;
+  const open = () => dbp ||= new Promise((res, rej) => {
+    const r = indexedDB.open("vinted-niche-watch", 1);
+    r.onupgradeneeded = () => r.result.createObjectStore("kv");
+    r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error);
+  });
+  const run = (mode, fn) => open().then(db => new Promise((res, rej) => {
+    const tx = db.transaction("kv", mode), st = tx.objectStore("kv"); const req = fn(st);
+    tx.oncomplete = () => res(req && req.result); tx.onerror = () => rej(tx.error);
+  }));
+  return {get: k => run("readonly", s => s.get(k)), set: (k, v) => run("readwrite", s => s.put(v, k)),
+          del: k => run("readwrite", s => s.delete(k))};
+})();
+
+const L = {
+  MAX_STALE: 5 * 60,
+  clockOffset: 0,
+  realNow() { return Date.now() / 1000 + this.clockOffset; },
+  clockNow(s) { return s.demo ? s.demo_t0 + (this.realNow() - s.demo_t0) * s.speed : this.realNow(); },
+  async index() { return (await IDB.get("index")) || []; },
+  async load(id) { return IDB.get("s" + id); },
+  async save(rec) {
+    await IDB.set("s" + rec.s.id, rec);
+    const idx = await this.index(), meta = this.meta(rec);
+    const i = idx.findIndex(x => x.id === rec.s.id);
+    if (i >= 0) idx[i] = meta; else idx.unshift(meta);
+    await IDB.set("index", idx);
+  },
+  meta(rec) {
+    const s = rec.s, items = Object.values(rec.items);
+    const en = enrich(items.map(i => ({...i})), s.window_min, s.hit_threshold);
+    const brands = brandStats(en);
+    return {...s, n_items: items.length, n_hits: en.filter(i => i.is_hit).length,
+            top_brands: brands.slice(0, 3).map(b => ({brand: b.brand, score: b.score, hits: b.hits}))};
+  },
+  async running() {
+    const idx = await this.index(), m = idx.find(x => x.status === "running");
+    return m ? this.load(m.id) : null;
+  },
+
+  async start(b) {
+    let f;
+    if (b.url) {
+      if (!b.url.includes("vinted.")) throw new Error("L'URL doit être une recherche vinted.fr.");
+      f = (await serverApi("/api/parse-url", {method: "POST", body: JSON.stringify({url: b.url})})).filters;
+    } else f = {catalog_ids: [], price_from: null, price_to: null, brand_ids: [], size_ids: [], status_ids: [], search_text: ""};
+    const ids = (b.catalog_id || "").replace(/;/g, ",").split(",").map(x => x.trim()).filter(x => /^\d+$/.test(x)).map(Number);
+    if (ids.length) f.catalog_ids = ids;
+    if (b.price_min != null) f.price_from = b.price_min;
+    if (b.price_max != null) f.price_to = b.price_max;
+    if (!(f.catalog_ids.length || f.search_text || f.brand_ids.length) && !b.demo) throw new Error("Indique une URL de recherche ou un ID de catégorie.");
+    if (f.price_from != null && f.price_to != null && f.price_from > f.price_to) throw new Error("Le prix min est supérieur au prix max.");
+    const cur = await this.running();
+    if (cur) { await this.finalizeIfStale(cur); if (await this.running()) throw new Error("Une veille est déjà en cours. Arrête-la d'abord."); }
+    const idx = await this.index(), id = (idx.reduce((m, x) => Math.max(m, x.id), 0)) + 1;
+    const real = this.realNow(), dur_ = b.duration_min, win = b.window_min;
+    const s = {id, created_at: real, start_ts: real, capture_end: real + dur_ * 60, final_end: real + (dur_ + win) * 60,
+      ended_at: null, status: "running", demo: b.demo ? 1 : 0, speed: b.demo ? INFO.demo_speed : 1, demo_t0: b.demo ? real : null,
+      seed: Math.floor(Math.random() * 1e9) + 1, filters: f, filters_label: filtersLabel(f), duration_min: dur_, window_min: win,
+      hit_threshold: b.threshold, interval_s: Math.max(45, b.interval_s), cycles: 0, requests: 0, next_tick_at: 0,
+      last_cycle_at: null, backoff_i: 0, api_level: "ok", api_text: "Démarrage… premier scan imminent",
+      last_cycle: {}, warnings: [], summary: null};
+    await this.save({s, items: {}, cookies: null, snaps: 0});
+    return {session_id: id};
+  },
+
+  async finish(rec, status) {
+    const s = rec.s;
+    s.status = status; s.ended_at = this.realNow(); s.api_level = "idle"; rec.cookies = null;
+    s.api_text = {done: "Veille terminée", stopped: "Veille arrêtée", error: "Veille arrêtée sur erreur",
+                  interrupted: "Veille interrompue (plus aucun scan)"}[status];
+    await this.save(rec);
+  },
+  async finalizeIfStale(rec) {
+    if (this.clockNow(rec.s) > rec.s.final_end + this.MAX_STALE) {
+      await this.finish(rec, (rec.s.last_cycle_at || 0) >= rec.s.final_end ? "done" : "interrupted"); return true;
+    }
+    return false;
+  },
+  async stop() { const r = await this.running(); if (r) await this.finish(r, "stopped"); return {ok: true}; },
+
+  busy: false,
+  async tick() {   // verrou inter-onglets : un seul scan à la fois sur cet appareil
+    if (navigator.locks) return navigator.locks.request("vnw-tick", {ifAvailable: true}, lock => lock ? this._tick() : {ran: false});
+    return this._tick();
+  },
+  async _tick() {
+    if (this.busy) return {ran: false};
+    const rec = await this.running();
+    if (!rec) return {ran: false};
+    if (await this.finalizeIfStale(rec)) return {ran: false};
+    const s = rec.s;
+    if (this.clockNow(s) < s.next_tick_at) return {ran: false};
+    this.busy = true;
+    try {
+      const body = {filters: s.filters, start_ts: s.start_ts, window_min: s.window_min, cookies: rec.cookies,
+                    demo: s.demo ? {seed: s.seed, now: this.clockNow(s), speed: s.speed, request_no: s.requests} : null};
+      let r;
+      try { r = await serverApi("/api/scan", {method: "POST", body: JSON.stringify(body)}); }
+      catch (e) { r = {status: "error", message: e.message, items: [], requests: 0, pages: 0, warnings: []}; }
+      const fresh = await this.load(s.id);           // la veille a pu être arrêtée pendant le scan
+      if (!fresh || fresh.s.status !== "running") return {ran: false};
+      Object.assign(rec, fresh); const S = rec.s;
+      const W = S.window_min * 60; let nNew = 0;
+      for (const it of r.items) {
+        let row = rec.items[it.item_id];
+        if (!row) {
+          if (!(S.start_ts <= it.posted_at && it.posted_at <= S.capture_end)) continue;   // captation uniquement
+          row = {session_id: S.id, item_id: it.item_id, title: it.title, brand: it.brand, price: it.price, currency: it.currency,
+                 size: it.size, condition: it.condition, url: it.url, photo_url: it.photo_url, posted_at: it.posted_at,
+                 first_seen: it.seen_at, first_age: it.age, window_fav: null, window_age: null};
+          nNew++;
+        }
+        row.last_age = it.age; row.last_fav = it.favs; row.last_views = it.views;
+        if (it.age <= W + 60 && (row.window_age == null || it.age >= row.window_age)) { row.window_fav = it.favs; row.window_age = it.age; }
+        rec.items[it.item_id] = row; rec.snaps = (rec.snaps || 0) + 1;
+      }
+      S.requests += r.requests || 0;
+      for (const w of r.warnings || []) if (!S.warnings.includes(w)) S.warnings.push(w);
+      if (r.cookies) rec.cookies = r.cookies;
+      const now = this.clockNow(S);
+      S.last_cycle = {pages: r.pages, new: nNew, snaps: r.items.length, at: now};
+      if (r.status === "ok") {
+        S.cycles += 1; S.last_cycle_at = now; S.backoff_i = 0; S.api_level = "ok"; S.api_text = "OK";
+        S.next_tick_at = Math.min(now + S.interval_s + Math.random() * 6, S.final_end + 1);
+      } else if (r.status === "rate_limited") {
+        const bo = INFO.backoff || [30, 60, 120, 240, 480, 600], delay = bo[Math.min(S.backoff_i, bo.length - 1)];
+        S.backoff_i += 1; S.api_level = "warn"; S.next_tick_at = now + delay; rec.cookies = null;
+        S.api_text = `Vinted limite les requêtes (HTTP ${r.http}) — pause ${delay} s` + (S.backoff_i > 1 ? ` (essai ${S.backoff_i})` : "");
+      } else {
+        S.backoff_i += 1; S.api_level = "error"; S.api_text = `Erreur API : ${r.message} (${S.backoff_i}/10)`; S.next_tick_at = now + S.interval_s;
+        if (S.backoff_i >= 10) { S.warnings.push("Arrêt après 10 erreurs API consécutives."); await this.finish(rec, "error"); return {ran: true}; }
+      }
+      if (r.status === "ok" && now >= S.final_end) { await this.finish(rec, "done"); return {ran: true, status: "done"}; }
+      await this.save(rec);
+      return {ran: true};
+    } finally { this.busy = false; }
+  },
+
+  async state() {
+    let rec = await this.running(), running = !!rec;
+    if (rec && await this.finalizeIfStale(rec)) { running = false; }
+    if (!running) { const idx = await this.index(); rec = idx.length ? await this.load(idx.reduce((a, b) => a.id > b.id ? a : b).id) : null; }
+    if (!rec) return {running: false, session: null};
+    const s = rec.s, now = running ? this.clockNow(s) : null;
+    const items = enrich(Object.values(rec.items).map(i => ({...i})), s.window_min, s.hit_threshold, now);
+    const brands = brandStats(items);
+    const top = [...items].sort((a, b) => ((b.window_fav ?? -1) - (a.window_fav ?? -1)) || ((b.favs_per_min || 0) - (a.favs_per_min || 0))).slice(0, 10);
+    const t = now ?? s.final_end;
+    let phase, pp;
+    if (t < s.capture_end) { phase = "capture"; pp = (t - s.start_ts) / (s.capture_end - s.start_ts); }
+    else if (t < s.final_end) { phase = "window"; pp = (t - s.capture_end) / Math.max(1, s.final_end - s.capture_end); }
+    else { phase = "end"; pp = 1; }
+    const clamp = x => Math.min(1, Math.max(0, x));
+    return {running, session: s, demo: !!s.demo, speed: s.demo ? s.speed : 1, now: t, phase, phase_progress: clamp(pp),
+      progress: clamp((t - s.start_ts) / (s.final_end - s.start_ts)), remaining_s: Math.max(0, s.final_end - t),
+      next_cycle_in: running && s.next_tick_at ? Math.max(0, s.next_tick_at - t) : null,
+      stalled: running && now - (s.next_tick_at || now) > 90, api: {level: s.api_level, text: s.api_text},
+      warnings: s.warnings, last_cycle: s.last_cycle, n_items: items.length, n_hits: items.filter(i => i.is_hit).length,
+      top_items: top, top_brands: brands.slice(0, 10)};
+  },
+  async sessions() { return [...await this.index()].sort((a, b) => b.created_at - a.created_at); },
+  async detail(id) {
+    const rec = await this.load(id);
+    if (!rec) throw new Error("Session introuvable");
+    const s = rec.s, live = s.status === "running", now = live ? this.clockNow(s) : null;
+    const items = enrich(Object.values(rec.items).map(i => ({...i})), s.window_min, s.hit_threshold, now);
+    items.sort((a, b) => (b.window_fav ?? -1) - (a.window_fav ?? -1));
+    return {session: {...s, n_snapshots: rec.snaps || 0}, items, brands: brandStats(items), live};
+  },
+  async del(id) {
+    const rec = await this.load(id);
+    if (rec?.s.status === "running") throw new Error("Impossible de supprimer la veille en cours.");
+    await IDB.del("s" + id); await IDB.set("index", (await this.index()).filter(x => x.id !== id));
+    return {ok: true};
+  },
+};
+
+/* --- calculs (identiques à app/db.py) --- */
+function enrich(items, windowMin, threshold, now = null) {
+  const w = windowMin * 60;
+  for (const it of items) {
+    const wf = it.window_fav, wa = it.window_age;
+    it.measured = wf != null;
+    it.in_progress = now != null && (now - it.posted_at) < w && wf != null;
+    it.partial = wf != null && wa != null && wa < w - 30 && !it.in_progress;
+    it.is_hit = wf != null && wf >= threshold;
+    it.age_min = now ? Math.round((now - it.posted_at) / 6) / 10 : null;
+    it.favs_per_min = wf != null && wa ? Math.round(wf / Math.max(wa / 60, 1) * 100) / 100 : null;
+  }
+  return items;
+}
+const median = a => { if (!a.length) return 0; const s = [...a].sort((x, y) => x - y), m = s.length >> 1; return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2; };
+const mean = a => a.reduce((x, y) => x + y, 0) / a.length;
+const r1 = (x, d) => Math.round(x * 10 ** d) / 10 ** d;
+function brandStats(items) {
+  const g = {};
+  for (const it of items) (g[it.brand || "(sans marque)"] ||= []).push(it);
+  const out = Object.entries(g).map(([brand, its]) => {
+    const favs = its.filter(i => i.window_fav != null).map(i => i.window_fav), prices = its.filter(i => i.price != null).map(i => i.price);
+    const hits = its.filter(i => i.is_hit).length, n = its.length, med = median(favs);
+    return {brand, n_items: n, hits, hit_rate: n ? r1(100 * hits / n, 1) : 0, fav_mean: favs.length ? r1(mean(favs), 1) : 0,
+      fav_median: med, fav_max: favs.length ? Math.max(...favs) : 0, price_mean: prices.length ? r1(mean(prices), 2) : null,
+      score: r1(med * Math.min(n, 5) / 5 + 2 * hits, 2)};
+  });
+  return out.sort((a, b) => (b.score - a.score) || (b.hits - a.hits) || (b.n_items - a.n_items));
+}
+function filtersLabel(f) {
+  const fmt = x => Number.isInteger(x) ? String(x) : x.toFixed(2).replace(".", ","), p = [];
+  if (f.search_text) p.push(`« ${f.search_text} »`);
+  if (f.catalog_ids?.length) p.push("cat. " + f.catalog_ids.join(","));
+  if (f.price_from != null || f.price_to != null) p.push(`${f.price_from != null ? fmt(f.price_from) : "0"}–${f.price_to != null ? fmt(f.price_to) : "∞"} €`);
+  for (const [k, lab] of [["brand_ids", "marques"], ["size_ids", "tailles"], ["status_ids", "états"]]) if (f[k]?.length) p.push(`${f[k].length} ${lab}`);
+  return p.join(" · ") || "Tout Vinted";
+}
+
+/* --- export CSV (; + BOM UTF-8 pour Excel) --- */
+function downloadCsv(rows, name) {
+  const cell = v => { v = v == null ? "" : String(v); return /[;"\n\r]/.test(v) ? `"${v.replace(/"/g, '""')}"` : v; };
+  const blob = new Blob(["﻿" + rows.map(r => r.map(cell).join(";")).join("\r\n")], {type: "text/csv;charset=utf-8"});
+  const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = name; a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+}
+const csvNum = (x, d = 2) => x == null ? "" : String(r1(Number(x), d)).replace(".", ",");
+const csvDate = t => t ? new Date(t * 1000).toLocaleString("fr-FR", {day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit"}).replace(",", "") : "";
+async function exportLocal(id, kind) {
+  const d = await L.detail(id), s = d.session;
+  if (kind === "brands") {
+    downloadCsv([["rang", "marque", "annonces", "hits", "taux de hit (%)", "favoris moyens", "favoris médians", "favoris max", "prix moyen", "score"],
+      ...d.brands.map((b, n) => [n + 1, b.brand, b.n_items, b.hits, csvNum(b.hit_rate, 1), csvNum(b.fav_mean, 1), csvNum(b.fav_median, 1), b.fav_max, csvNum(b.price_mean), csvNum(b.score)])],
+      `veille_${id}_marques.csv`);
+  } else {
+    downloadCsv([["id", "titre", "marque", "prix", "devise", "taille", "état", "mise en ligne", `favoris ${s.window_min} min`, "âge du relevé (min)", "mesure", "hit", "favoris dernier relevé", "vues dernier relevé", "lien"],
+      ...d.items.map(i => [i.item_id, i.title, i.brand, csvNum(i.price), i.currency, i.size, i.condition, csvDate(i.posted_at), csvNum(i.window_fav),
+        csvNum(i.window_age != null ? i.window_age / 60 : null, 1), !i.measured ? "non mesurée" : i.partial ? "partielle" : i.in_progress ? "en cours" : "complète",
+        i.is_hit ? "oui" : "non", csvNum(i.last_fav), csvNum(i.last_views), i.url])], `veille_${id}_annonces.csv`);
+  }
+}
+
+/* --- aiguillage : en mode navigateur, les routes « à état » sont servies par L --- */
+async function localRoute(path, opts) {
+  const m = (opts.method || "GET").toUpperCase(), body = opts.body ? JSON.parse(opts.body) : null;
+  let x;
+  if (path === "/api/state") return L.state();
+  if (path === "/api/start") return L.start(body);
+  if (path === "/api/stop") return L.stop();
+  if (path === "/api/tick") return L.tick();
+  if (path === "/api/sessions") return L.sessions();
+  if ((x = path.match(/^\/api\/sessions\/(\d+)$/))) return m === "DELETE" ? L.del(+x[1]) : L.detail(+x[1]);
+  return undefined;
 }
 
 /* ---------- routage ---------- */
@@ -343,6 +606,7 @@ function renderForm(s) {
       <button class="btn" id="go" type="submit">▶ Lancer la veille</button>
     </div>
     <div id="ferr"></div>
+    ${INFO.storage === "browser" ? `<div class="hint" style="margin-top:12px">ℹ Mode navigateur : la veille tourne tant que cette page reste ouverte, et l'historique est enregistré sur cet appareil.</div>` : ""}
   </form>
   <div class="card small muted">
     <b style="color:var(--text)">Comment ça marche ?</b> L'app scanne toutes les <i>nouvelles</i> annonces de la recherche,
@@ -353,6 +617,7 @@ function renderForm(s) {
   const form = $("#f");
   let t;
   const parse = async () => {
+    if (!$("#url")) return;   // on a quitté le formulaire entre-temps
     const u = $("#url").value.trim();
     if (!u) { $("#parsed").innerHTML = ""; return; }
     try {
@@ -365,10 +630,12 @@ function renderForm(s) {
       if (p.brand_ids.length) c.push(`${p.brand_ids.length} marque(s)`);
       if (p.size_ids.length) c.push(`${p.size_ids.length} taille(s)`);
       if (p.status_ids.length) c.push(`${p.status_ids.length} état(s)`);
+      if (!$("#parsed")) return;
       $("#parsed").innerHTML = c.length ? c.map(x => `<span class="chip">${x}</span>`).join("") : `<span class="chip gray">Aucun filtre reconnu</span>`;
     } catch { $("#parsed").innerHTML = ""; }
   };
   const updHint = () => {
+    if (!$("#dur")) return;
     const d = +$("#dur").value || 0, w = +$("#win").value || 0, demo = $("#demo").checked;
     const tot = (d + w) * 60;
     $("#durhint").textContent = `Durée totale ≈ ${dur(demo ? tot / 30 : tot)}${demo ? " (réels, en démo)" : ""} : ${d} min de captation + ${w} min de fenêtre de fin.`;
@@ -434,7 +701,7 @@ function renderLive(s, token) {
       <div class="stat"><div class="l">Cycles</div><div class="v">${nf(se.cycles)}</div><div class="small muted">${nxt}${lc.pages ? ` · dernier : ${lc.pages} p., +${lc.new}` : ""}</div></div>
     </div>
     ${s.stalled ? `<div class="warnbox">⏸ Veille en pause : aucun scan récent. ${INFO.serverless ? "Sur Vercel, garde cette page ouverte (écran allumé) ou configure un cron externe (voir README)." : ""}</div>` : ""}
-    ${INFO.serverless && !s.demo ? `<div class="hint" style="margin-top:10px">ℹ Les scans sont déclenchés par cette page tant qu'elle est ouverte${navigator.wakeLock ? " (l'écran reste allumé)" : ""}, ou par ton cron externe.</div>` : ""}
+    ${INFO.serverless ? `<div class="hint" style="margin-top:10px">ℹ Les scans sont déclenchés par cette page : garde-la ouverte${navigator.wakeLock ? " (l'écran reste allumé)" : ""}${INFO.storage === "browser" ? "" : ", ou utilise un cron externe"}.</div>` : ""}
     ${(s.warnings || []).map(w => `<div class="warnbox">⚠ ${esc(w)}</div>`).join("")}
   </div>
   <div class="grid g2">
@@ -476,8 +743,10 @@ async function viewSession(id, token) {
       <div class="muted small">${dt(s.created_at)} · ${esc(s.filters_label)}</div></div>
       <span class="spacer"></span>
       ${d.live ? `<a class="btn sm" href="#veille">Suivi en direct</a>` : ""}
-      <a class="btn ghost sm" href="${withKey(`/api/sessions/${s.id}/export/brands.csv`)}">⇩ CSV marques</a>
-      <a class="btn ghost sm" href="${withKey(`/api/sessions/${s.id}/export/items.csv`)}">⇩ CSV annonces</a>
+      ${INFO.storage === "browser"
+        ? `<button class="btn ghost sm" data-exp="brands">⇩ CSV marques</button><button class="btn ghost sm" data-exp="items">⇩ CSV annonces</button>`
+        : `<a class="btn ghost sm" href="${withKey(`/api/sessions/${s.id}/export/brands.csv`)}">⇩ CSV marques</a>
+      <a class="btn ghost sm" href="${withKey(`/api/sessions/${s.id}/export/items.csv`)}">⇩ CSV annonces</a>`}
       ${d.live ? "" : `<button class="btn ghost sm" id="del" title="Supprimer">🗑</button>`}
     </div>
     <div class="kv">
@@ -501,6 +770,7 @@ async function viewSession(id, token) {
     bindTables($("#app"), draw);
   };
   draw();
+  document.querySelectorAll("[data-exp]").forEach(b => b.onclick = () => exportLocal(s.id, b.dataset.exp));
   const del = $("#del");
   if (del) del.onclick = async () => {
     if (!confirm(`Supprimer définitivement la veille #${s.id} ?`)) return;
@@ -533,7 +803,7 @@ async function viewHistory(token) {
   });
 }
 
-fetch("/api/info").then(r => r.json()).then(i => INFO = i).catch(() => {}).finally(route);
+fetch("/api/info").then(r => r.json()).then(i => { INFO = i; if (i.server_time) L.clockOffset = i.server_time - Date.now() / 1000; }).catch(() => {}).finally(route);
 </script>
 </body>
 </html>

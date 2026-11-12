@@ -10,6 +10,7 @@ import logging
 import os
 import socket
 import threading
+import time
 import webbrowser
 from contextlib import asynccontextmanager
 from datetime import datetime
@@ -33,10 +34,10 @@ CRON_SECRET = os.environ.get("CRON_SECRET", "")
 
 CONFIG_ERROR = ""
 db: DB | None = None
-if SERVERLESS and not (os.environ.get("DATABASE_URL") or os.environ.get("POSTGRES_URL")):
-    CONFIG_ERROR = ("Aucune base de données : dans Vercel, onglet Storage, crée une base Postgres (Neon), "
-                    "connecte-la au projet, puis redéploie.")
-else:
+# Sur Vercel sans base : « mode navigateur ». Le serveur ne fait que les appels Vinted (/api/scan)
+# et le suivi + l'historique sont stockés dans le navigateur (IndexedDB).
+BROWSER_MODE = SERVERLESS and not (os.environ.get("DATABASE_URL") or os.environ.get("POSTGRES_URL"))
+if not BROWSER_MODE:
     try:
         db = DB()
     except Exception as e:  # base injoignable / identifiants faux
@@ -132,7 +133,17 @@ def index():
 @app.get("/api/info")
 def info():
     return {"serverless": SERVERLESS, "auth_required": bool(APP_PASSWORD), "min_interval": MIN_INTERVAL,
-            "database": "postgres" if db.pg else "sqlite"}
+            "storage": "browser" if BROWSER_MODE else "server", "server_time": time.time(),
+            "demo_speed": vinted.DEMO_SPEED, "backoff": tracker.BACKOFF}
+
+
+@app.middleware("http")
+async def browser_mode_guard(request: Request, call_next):
+    """En mode navigateur, seules les routes sans état sont disponibles."""
+    p = request.url.path
+    if BROWSER_MODE and p.startswith("/api/") and p not in ("/api/info", "/api/scan", "/api/parse-url"):
+        return JSONResponse({"detail": "Mode navigateur : cette route est gérée par la page."}, status_code=400)
+    return await call_next(request)
 
 
 @app.post("/api/parse-url")
@@ -161,6 +172,51 @@ def build_filters(b: StartBody) -> dict:
     if f["price_from"] is not None and f["price_to"] is not None and f["price_from"] > f["price_to"]:
         raise HTTPException(400, "Le prix min est supérieur au prix max.")
     return f
+
+
+class DemoParams(BaseModel):
+    seed: int
+    now: float
+    speed: float
+    request_no: int = 0
+
+
+class ScanBody(BaseModel):
+    filters: dict
+    start_ts: float
+    window_min: int = Field(ge=1)
+    cookies: dict | None = None
+    demo: DemoParams | None = None
+
+
+@app.post("/api/scan")
+def scan(body: ScanBody):
+    """Un scan sans état (mode navigateur) : renvoie les annonces vues, la page fait le suivi."""
+    if body.demo:
+        d, real0 = body.demo, time.time()
+        now_fn = lambda: d.now + (time.time() - real0) * d.speed  # noqa: E731
+        sleep_fn = lambda sec: time.sleep(sec / d.speed)  # noqa: E731
+        client = vinted.DemoClient(d.now, body.filters, d.seed, d.request_no)
+    else:
+        now_fn, sleep_fn = time.time, time.sleep
+        client = vinted.VintedClient(body.cookies)
+    out: list = []
+    meta = {"requests": 0, "pages": 0}
+    warnings: list[str] = []
+    res = {"status": "ok"}
+    try:
+        tracker.scan_pages(client, body.filters, body.start_ts, body.window_min * 60 + 120, now_fn, sleep_fn,
+                           out, meta, warnings.append)
+    except vinted.RateLimited as e:
+        res = {"status": "rate_limited", "http": e.status}
+    except vinted.ApiError as e:
+        res = {"status": "error", "message": str(e)}
+    keep = ("item_id", "title", "brand", "price", "currency", "size", "condition", "url", "photo_url",
+            "posted_at", "favs", "views", "age", "seen_at")
+    res.update(items=[{k: it[k] for k in keep} for it in out], pages=meta["pages"], requests=meta["requests"],
+               warnings=warnings, now=now_fn(),
+               cookies=(client.export_cookies() if not client.demo and client.warmed else None))
+    return res
 
 
 @app.post("/api/start")

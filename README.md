@@ -21,33 +21,29 @@ le demande (réseau **privé**), ou relance `start.bat` après avoir accepté.
 
 ## Mise en ligne sur Vercel
 
-1. **Projet** : sur vercel.com, *Add New › Project*, importe ce dépôt GitHub. Aucun réglage de build :
-   Vercel détecte FastAPI tout seul (`app/main.py`).
-2. **Base de données** (obligatoire, Vercel n'a pas de disque) : onglet **Storage › Create Database ›
-   Neon (Postgres)**, offre gratuite, puis **Connect** au projet. La variable `DATABASE_URL` est ajoutée
-   automatiquement. Les tables se créent au premier lancement.
-3. **Mot de passe** (fortement conseillé, l'URL est publique) : *Settings › Environment Variables*,
-   ajoute `APP_PASSWORD` = ton mot de passe. L'app le demandera une fois par appareil.
-4. **Redeploy** (onglet Deployments › ⋯ › Redeploy) pour prendre en compte les variables.
+Importe ce dépôt dans Vercel (*Add New › Project*), sans aucun réglage : ça marche directement.
 
-Sans base connectée, la page affiche « configuration à terminer » au lieu de planter.
+### Mode navigateur (par défaut, rien à configurer)
+Sans base de données, Vercel ne sert qu'à interroger Vinted (`/api/scan`, sans état). Le suivi des
+annonces, les calculs et l'historique tournent **dans ta page** et sont enregistrés **dans ton navigateur**.
+- La veille avance **tant que la page de veille est ouverte** (sur téléphone, l'écran reste allumé).
+  Si tu la fermes, la veille se met en pause et reprend à la réouverture.
+- L'historique est propre à chaque appareil/navigateur (PC et téléphone ne partagent pas leurs veilles).
 
-### Comment la veille tourne sur Vercel
-Vercel n'exécute rien en tâche de fond : chaque scan est déclenché par un appel à `/api/tick`.
-- **Page ouverte** : tant que l'écran de veille est ouvert (PC ou téléphone), il déclenche les scans
-  (et garde l'écran du téléphone allumé). Si tu fermes la page, la veille se met en pause.
-- **Cron externe (recommandé pour fermer la page)** : crée un compte gratuit sur
-  [cron-job.org](https://cron-job.org), tâche **toutes les minutes** sur
-  `https://TON-PROJET.vercel.app/api/tick?key=TON_MOT_DE_PASSE`.
-  (Les crons Vercel du plan gratuit ne tournent qu'une fois par jour : inutilisables ici.)
-  Tu peux aussi définir `CRON_SECRET` et envoyer l'en-tête `Authorization: Bearer <CRON_SECRET>`.
+### Mode serveur (optionnel) : historique partagé + veille page fermée
+1. Onglet **Storage › Create Database › Neon (Postgres)** (gratuit), puis **Connect** au projet :
+   `DATABASE_URL` est ajoutée automatiquement, l'app passe toute seule en mode serveur.
+2. Pour que la veille avance page fermée : compte gratuit sur [cron-job.org](https://cron-job.org),
+   tâche **toutes les minutes** sur `https://TON-PROJET.vercel.app/api/tick` (ajoute `?key=TON_MOT_DE_PASSE`
+   si tu as mis un mot de passe). Les crons Vercel gratuits ne tournent qu'une fois par jour.
+3. **Redeploy** après chaque ajout de variable.
 
-Un scan ne se fait jamais en double, même avec plusieurs pages ouvertes + le cron.
-Une veille qui ne reçoit plus aucun scan 5 min après sa fin est clôturée automatiquement.
+### Mot de passe (conseillé, l'URL est publique)
+*Settings › Environment Variables* : `APP_PASSWORD` = ton mot de passe, puis Redeploy.
 
 ⚠ **Vinted bloque souvent les IP des hébergeurs** (Vercel = datacenter). Si le statut API reste sur
-« HTTP 403 », la version Vercel ne pourra pas interroger Vinted : utilise alors la version locale
-(`start.bat`), qui passe par ta connexion. Le mode démo, lui, marche partout.
+« HTTP 403 », Vercel ne pourra pas interroger Vinted : utilise alors la version locale (`start.bat`),
+qui passe par ta connexion. Le mode démo, lui, marche partout.
 
 ## Utilisation
 
@@ -90,6 +86,6 @@ app/main.py      serveur FastAPI (API, mot de passe, exports CSV)
 app/vinted.py    appels Vinted, lecture d'URL, flux démo
 app/tracker.py   veille : un « tick » = un scan, état 100 % en base
 app/db.py        Postgres (Vercel) ou SQLite (local) + calculs
-public/index.html  interface (une seule page)
+public/index.html  interface + moteur « mode navigateur » (IndexedDB)
 start.bat        installation + lancement
 ```
