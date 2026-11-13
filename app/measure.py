@@ -111,12 +111,56 @@ def enrich(it: dict, window_min: int, threshold: int, now: float | None) -> dict
     return it
 
 
-def brand_stats(items: list[dict]) -> list[dict]:
+import re as _re
+import unicodedata as _ud
+
+# Variantes d'une même marque regroupées (sous-lignes, collaborations, casse, accents).
+BRAND_ALIASES = {
+    "polo ralph lauren": "ralph lauren", "lauren ralph lauren": "ralph lauren", "polo by ralph lauren": "ralph lauren",
+    "ralph lauren polo": "ralph lauren", "tommy jeans": "tommy hilfiger", "hilfiger denim": "tommy hilfiger",
+    "calvin klein jeans": "calvin klein", "ck calvin klein": "calvin klein", "levis": "levi s", "levi strauss": "levi s",
+    "the north face": "the north face", "north face": "the north face", "tnf": "the north face",
+    "nike sportswear": "nike", "nike air": "nike", "nike sb": "nike", "nike acg": "nike", "nike golf": "nike",
+    "adidas originals": "adidas", "adidas performance": "adidas", "adidas neo": "adidas", "adidas by stella mccartney": "adidas",
+    "jordan": "jordan", "air jordan": "jordan", "zara basic": "zara", "zara trafaluc": "zara", "zara woman": "zara",
+    "h m": "h&m", "h and m": "h&m", "hm": "h&m", "hugo boss": "boss", "boss orange": "boss", "boss black": "boss", "hugo": "boss",
+    "g star raw": "g-star", "g star": "g-star", "stussy": "stussy", "cp company": "c.p. company", "c p company": "c.p. company",
+    "dr martens": "dr. martens", "dr. martens": "dr. martens", "new balance": "new balance", "carhartt wip": "carhartt",
+}
+_SUFFIX = _re.compile(r"(\s+(originals|original|sportswear|vintage|kids|junior|enfant|homme|femme|woman|women|men|"
+                      r"collection|paris|london|italia|france|usa|official))+$")   # en fin de nom seulement
+
+
+def brand_key(name: str | None) -> str:
+    """Clé de regroupement d'une marque : « Polo Ralph Lauren », « RALPH LAUREN » -> « ralph lauren »."""
+    if not name or name == "(sans marque)":
+        return "(sans marque)"
+    k = _ud.normalize("NFKD", name).encode("ascii", "ignore").decode().lower()
+    k = _re.split(r"\s+(?:x|×|&|feat\.?)\s+", k)[0]                 # collaborations : « Nike x Nocta » -> nike
+    k = _re.sub(r"[^a-z0-9.&]+", " ", k).strip()
+    k = BRAND_ALIASES.get(k, k)
+    k2 = _SUFFIX.sub(" ", k).strip()
+    k2 = _re.sub(r"\s+", " ", k2)
+    return BRAND_ALIASES.get(k2, k2) or k
+
+
+def group_brands(items: list[dict]) -> dict[str, tuple[str, list[dict]]]:
+    """{clé: (nom affiché = variante la plus fréquente, annonces)}."""
     groups: dict[str, list[dict]] = {}
     for it in items:
-        groups.setdefault(it.get("brand") or "(sans marque)", []).append(it)
+        groups.setdefault(brand_key(it.get("brand")), []).append(it)
+    out = {}
+    for k, its in groups.items():
+        names: dict[str, int] = {}
+        for i in its:
+            names[i.get("brand") or "(sans marque)"] = names.get(i.get("brand") or "(sans marque)", 0) + 1
+        out[k] = (max(names, key=names.get), its)
+    return out
+
+
+def brand_stats(items: list[dict]) -> list[dict]:
     out = []
-    for brand, its in groups.items():
+    for _key, (brand, its) in group_brands(items).items():
         favs = [i["window_fav"] for i in its if i["window_fav"] is not None]
         prices = [i["price"] for i in its if i.get("price") is not None]
         hits = sum(1 for i in its if i["is_hit"])

@@ -79,8 +79,20 @@ def _price_stats(prices: list[float]) -> dict:
             "spread": round((q(0.75) - q(0.25)) / med, 2) if med else None}
 
 
+def _flow_per_day(items: list[dict], total: int | None, now: float) -> float | None:
+    """Annonces publiées par jour dans la niche : sur la page « plus récentes », N annonces couvrent
+    l'âge de la plus ancienne d'entre elles (datée par l'horloge des IDs)."""
+    ids = sorted((i["item_id"] for i in items if not i.get("promoted")), reverse=True)
+    if len(ids) < 3:
+        return 0.0
+    age_days = max((now - idclock.to_time(ids[-1])) / 86400, 1 / 1440)
+    return round(len(ids) / age_days, 1)
+
+
 def brand_info(client, brand: str, catalog_id: int | None, price_from=None, price_to=None, status_ids=None) -> dict:
-    """Mesures d'une niche « marque × catégorie » pour la méthode d'Evan (flow rate, concurrence, prix)."""
+    """Mesures d'une niche « marque × catégorie » (méthode d'Evan) : volume de la marque, annonces dans la
+    niche et dans la tranche de prix, flux (annonces publiées / jour), prix (médiane, quartiles, dispersion),
+    part de revendeurs. 3 requêtes."""
     if getattr(client, "demo", False):
         return _demo_brand_info(brand, catalog_id, price_from, price_to)
     out: dict = {"brand": brand, "catalog_id": catalog_id}
@@ -93,20 +105,19 @@ def brand_info(client, brand: str, catalog_id: int | None, price_from=None, pric
         return out
     out.update(brand_id=best["id"], brand_title=best.get("title"), brand_items=best.get("item_count"),
                brand_favourites=best.get("favourite_count"))
-    base = {"brand_ids": [best["id"]], "catalog_ids": [catalog_id] if catalog_id else [],
-            "status_ids": status_ids or []}
-    raw = client.fetch_page(base, 1, {"order": "relevance"})
+    base = {"brand_ids": [best["id"]], "catalog_ids": [catalog_id] if catalog_id else [], "status_ids": status_ids or []}
+    norm = lambda raw: [x for x in (vinted.normalize_item(r) for r in raw) if x]  # noqa: E731
+    time.sleep(random.uniform(0.5, 1.0))
+    client.fetch_page(base, 1, {"order": "newest_first", "per_page": 20})
     out["niche_total"] = (getattr(client, "last_pagination", {}) or {}).get("total_entries")
-    out["niche_prices"] = _price_stats([vinted.normalize_item(r)["price"] for r in raw if vinted.normalize_item(r)])
+    time.sleep(random.uniform(0.5, 1.0))
+    raw = client.fetch_page(dict(base, price_from=price_from, price_to=price_to), 1, {"order": "newest_first"})
+    items = norm(raw)
+    out["niche_price_total"] = (getattr(client, "last_pagination", {}) or {}).get("total_entries")
+    out["price_band_prices"] = _price_stats([i["price"] for i in items])
+    out["niche_prices"] = out["price_band_prices"]
     out["resellers"] = _sellers_concentration(raw)
-    if price_from is not None or price_to is not None:
-        time.sleep(random.uniform(0.6, 1.2))
-        raw2 = client.fetch_page(dict(base, price_from=price_from, price_to=price_to), 1, {"order": "relevance"})
-        out["niche_price_total"] = (getattr(client, "last_pagination", {}) or {}).get("total_entries")
-        out["price_band_prices"] = _price_stats([vinted.normalize_item(r)["price"] for r in raw2 if vinted.normalize_item(r)])
-    else:
-        out["niche_price_total"] = out["niche_total"]
-        out["price_band_prices"] = out["niche_prices"]
+    out["flow_per_day"] = _flow_per_day(items, out["niche_price_total"], time.time())
     out["ultra_competitive"] = any(best.get("title", "").lower() == b.lower() for b in ULTRA_COMPETITIVE)
     return out
 
@@ -127,7 +138,7 @@ def _demo_brand_info(brand, catalog_id, pf, pt) -> dict:
             "niche_prices": {"n": 96, "median": round(med, 1), "p25": round(med * (1 - spread / 2), 1),
                              "p75": round(med * (1 + spread / 2), 1), "spread": spread},
             "niche_price_total": int(niche * 0.6), "price_band_prices": {"n": 96, "median": round(med, 1), "spread": spread},
-            "resellers": round(0.4 * _h(brand, "r"), 3),
+            "resellers": round(0.4 * _h(brand, "r"), 3), "flow_per_day": round(2 + 120 * _h(brand, catalog_id, "f") ** 2, 1),
             "ultra_competitive": any(brand.lower() == b.lower() for b in ULTRA_COMPETITIVE)}
 
 

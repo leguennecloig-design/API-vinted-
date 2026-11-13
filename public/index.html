@@ -159,6 +159,32 @@ td img{width:34px;height:44px;object-fit:cover;border-radius:6px;vertical-align:
 .kv b{display:block;font-size:17px}
 .kv span{font-size:12px;color:var(--muted);font-weight:600}
 .hidden{display:none!important}
+select{width:100%;padding:10px 12px;border-radius:10px;border:1px solid var(--line);background:var(--input);color:var(--text);font:inherit}
+details summary{color:var(--muted)}
+/* accueil */
+.home{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+@media (max-width:700px){.home{grid-template-columns:minmax(0,1fr)}}
+.act{display:flex;gap:14px;align-items:flex-start;padding:18px;border-radius:var(--radius);border:1px solid var(--line);background:var(--card);box-shadow:var(--shadow);color:var(--text)}
+.act:hover{border-color:var(--brand);text-decoration:none}
+.act .ic{font-size:28px;line-height:1;flex:none}
+.act b{font-size:16px;display:block;margin-bottom:4px}
+.act p{margin:0;color:var(--muted);font-size:14px}
+.act.main{border-color:var(--brand);background:linear-gradient(135deg,var(--brand-soft),var(--card))}
+/* niches */
+.niches{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:12px}
+.niche{border:1px solid var(--line);border-radius:14px;padding:14px;background:var(--card)}
+.niche.go{border-color:var(--ok);box-shadow:inset 4px 0 var(--ok)}
+.niche.try{border-color:var(--warn);box-shadow:inset 4px 0 var(--warn)}
+.niche .nh{display:flex;justify-content:space-between;gap:10px;align-items:flex-start;margin-bottom:10px}
+.niche .ng{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:8px}
+.niche .ng div{background:var(--bg);border-radius:10px;padding:7px 10px}
+.niche .ng span{display:block;font-size:11px;color:var(--muted);font-weight:600}
+.niche .ng b{display:block;font-size:16px}
+.niche .ng small{font-size:11px;color:var(--muted)}
+.vbadge{font-size:12px;font-weight:800;border-radius:8px;padding:4px 8px;white-space:nowrap;background:var(--bg);color:var(--muted)}
+.vbadge.go{background:color-mix(in srgb,var(--ok) 16%,transparent);color:var(--ok)}
+.vbadge.try{background:color-mix(in srgb,var(--warn) 16%,transparent);color:var(--warn)}
+.vbadge.no{background:color-mix(in srgb,var(--err) 12%,transparent);color:var(--err)}
 .catpick{border:1px solid var(--line);border-radius:12px;padding:10px;background:var(--input)}
 .catpick .chips{margin:0 0 8px}
 .catpick input[type=text]{background:var(--card)}
@@ -175,10 +201,11 @@ td img{width:34px;height:44px;object-fit:cover;border-radius:6px;vertical-align:
     <a class="logo" href="#veille"><i><svg width="18" height="18" viewBox="0 0 32 32"><path d="M7 17l5 5 13-13" stroke="#fff" stroke-width="4" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg></i>
       <span>Niche Watch<small>Vinted</small></span></a>
     <nav>
-      <a href="#veille" id="nav-veille">Veille<span id="navdot" class="live-dot hidden"></span></a>
+      <a href="#accueil" id="nav-accueil">Accueil</a>
+      <a href="#evan" id="nav-evan">🎯 Niches</a>
       <a href="#radar" id="nav-radar">📡 Radar</a>
       <a href="#recherche" id="nav-recherche">🔎 Recherche</a>
-      <a href="#evan" id="nav-evan">🎯 Méthode Evan</a>
+      <a href="#veille" id="nav-veille">⏱ Veille<span id="navdot" class="live-dot hidden"></span></a>
       <a href="#historique" id="nav-historique">Historique</a>
     </nav>
   </div>
@@ -546,10 +573,33 @@ function enrich(items, windowMin, threshold, now = null) { for (const it of item
 const median = a => { if (!a.length) return 0; const s = [...a].sort((x, y) => x - y), m = s.length >> 1; return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2; };
 const mean = a => a.reduce((x, y) => x + y, 0) / a.length;
 const r1 = (x, d) => Math.round(x * 10 ** d) / 10 ** d;
+/* --- regroupement des marques (port de measure.brand_key) : « Polo Ralph Lauren » = « Ralph Lauren » --- */
+const BRAND_ALIASES = {"polo ralph lauren": "ralph lauren", "lauren ralph lauren": "ralph lauren", "polo by ralph lauren": "ralph lauren",
+  "ralph lauren polo": "ralph lauren", "tommy jeans": "tommy hilfiger", "hilfiger denim": "tommy hilfiger", "calvin klein jeans": "calvin klein",
+  "ck calvin klein": "calvin klein", "levis": "levi s", "levi strauss": "levi s", "north face": "the north face", "tnf": "the north face",
+  "nike sportswear": "nike", "nike air": "nike", "nike sb": "nike", "nike acg": "nike", "nike golf": "nike", "adidas originals": "adidas",
+  "adidas performance": "adidas", "adidas neo": "adidas", "adidas by stella mccartney": "adidas", "air jordan": "jordan", "zara basic": "zara",
+  "zara trafaluc": "zara", "zara woman": "zara", "h m": "h&m", "h and m": "h&m", "hm": "h&m", "hugo boss": "boss", "boss orange": "boss",
+  "boss black": "boss", "hugo": "boss", "g star raw": "g-star", "g star": "g-star", "cp company": "c.p. company", "c p company": "c.p. company",
+  "dr martens": "dr. martens", "carhartt wip": "carhartt"};
+function brandKey(name) {
+  if (!name || name === "(sans marque)") return "(sans marque)";
+  let k = name.normalize("NFKD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
+  k = k.split(/\s+(?:x|×|&|feat\.?)\s+/)[0].replace(/[^a-z0-9.&]+/g, " ").trim();
+  k = BRAND_ALIASES[k] || k;
+  const k2 = k.replace(/(\s+(originals|original|sportswear|vintage|kids|junior|enfant|homme|femme|woman|women|men|collection|paris|london|italia|france|usa|official))+$/, "").replace(/\s+/g, " ").trim();
+  return BRAND_ALIASES[k2] || k2 || k;
+}
+function groupBrands(items, field = "brand") {   // Map clé -> {name: variante la plus fréquente, items}
+  const g = new Map();
+  for (const it of items) { const k = brandKey(it[field]); if (!g.has(k)) g.set(k, []); g.get(k).push(it); }
+  const out = new Map();
+  for (const [k, its] of g) { const c = {}; its.forEach(i => c[i[field] || "(sans marque)"] = (c[i[field] || "(sans marque)"] || 0) + 1);
+    out.set(k, {name: Object.entries(c).sort((a, b) => b[1] - a[1])[0][0], items: its}); }
+  return out;
+}
 function brandStats(items) {
-  const g = {};
-  for (const it of items) (g[it.brand || "(sans marque)"] ||= []).push(it);
-  const out = Object.entries(g).map(([brand, its]) => {
+  const out = [...groupBrands(items).values()].map(({name: brand, items: its}) => {
     const favs = its.filter(i => i.window_fav != null).map(i => i.window_fav), prices = its.filter(i => i.price != null).map(i => i.price);
     const hits = its.filter(i => i.is_hit).length, n = its.length, med = median(favs), gone = its.filter(i => i.gone).length;
     return {brand, n_items: n, hits, hot: its.filter(i => i.hot).length, gone, hit_rate: n ? r1(100 * hits / n, 1) : 0,
@@ -644,7 +694,8 @@ function stopPoll() { clearTimeout(pollTimer); pollTimer = null; }
 async function route() {
   stopPoll();
   const token = ++renderToken;
-  const h = location.hash.replace(/^#/, "") || "veille";
+  const h = location.hash.replace(/^#/, "") || "accueil";
+  if (h === "accueil") { $("#nav-accueil").classList.add("on"); return viewHome(token); }
   document.querySelectorAll("nav a").forEach(a => a.classList.remove("on"));
   if (h.startsWith("session/")) { $("#nav-historique").classList.add("on"); return viewSession(+h.split("/")[1], token); }
   if (h === "historique") { $("#nav-historique").classList.add("on"); return viewHistory(token); }
@@ -771,6 +822,29 @@ async function initCatPicker() {
   let t; $("#catq")?.addEventListener("input", () => { clearTimeout(t); t = setTimeout(drawCatTree, 150); });
 }
 
+/* ---------- accueil : « que veux-tu faire ? » ---------- */
+async function viewHome(token) {
+  const st = await api("/api/state").catch(() => ({}));
+  const radar = await IDB.get("radar:current").catch(() => null), evan = await IDB.get("evan:last").catch(() => null);
+  if (token !== renderToken) return;
+  $("#navdot").classList.toggle("hidden", !st.running);
+  const go = (evan?.niches || []).filter(n => n.verdict === "GO").sort((a, b) => b.score - a.score).slice(0, 4);
+  const rb = radar && typeof radarBrands === "function" ? radarBrands(radar).slice(0, 5) : [];
+  $("#app").innerHTML = `
+  <h2 style="margin:4px 0 14px">Que veux-tu faire ?</h2>
+  <div class="home">
+    <a class="act main" href="#evan"><span class="ic">🎯</span><span><b>Trouver des niches rentables</b><p>Choisis une catégorie : l'app teste toutes ses sous-catégories et note chaque niche marque × catégorie (demande, flux, prix, concurrence) avec le prix d'achat cible.</p></span></a>
+    <a class="act" href="#radar"><span class="ic">📡</span><span><b>Voir ce qui cartonne en ce moment</b><p>Radar continu sur tout Vinted : les annonces qui prennent le plus de favoris dans leurs 15 premières minutes, et le classement des marques sur la durée.</p></span></a>
+    <a class="act" href="#recherche"><span class="ic">🔎</span><span><b>Trouver des articles très likés</b><p>Ex. « plus de 40 favoris, postés il y a 1 à 2 jours » sur les catégories de ton choix.</p></span></a>
+    <a class="act" href="#veille"><span class="ic">⏱</span><span><b>Surveiller une niche précise</b><p>Mesure exacte des favoris à 5, 10 et 15 min de chaque nouvelle annonce, alertes en direct.</p></span></a>
+  </div>
+  ${st.running ? `<div class="notice" style="margin-top:16px"><span>⏱ Une veille tourne : <b>${esc(st.session.filters_label)}</b> · ${nf(st.n_items)} annonces · ${nf(st.n_hits)} hits</span><span class="spacer"></span><a class="btn sm" href="#veille">Voir</a></div>` : ""}
+  ${go.length ? `<div class="card" style="margin-top:16px"><div class="row"><h3 style="margin:0">🎯 Tes dernières niches GO</h3><span class="spacer"></span><a href="#evan" class="small">tout voir →</a></div>
+    <div class="chips" style="margin-top:10px">${go.map(n => `<a class="chip" href="${esc(n.url || "#evan")}" target="_blank" rel="noopener">${esc(n.brand)} · ${esc(shortCat(n.cat))} · ${n.score}/100</a>`).join("")}</div></div>` : ""}
+  ${rb.length ? `<div class="card" style="margin-top:16px"><div class="row"><h3 style="margin:0">📡 Marques qui cartonnent (radar)</h3><span class="spacer"></span><a href="#radar" class="small">tout voir →</a></div>
+    <div class="chips" style="margin-top:10px">${rb.map((b, i) => `<span class="chip ${b.hot ? "orange" : ""}">${i + 1}. ${esc(b.brand)} · ${b.hot} 🔥 · méd. ${nf(b.f15_med)} fav</span>`).join("")}</div></div>` : ""}`;
+}
+
 /* ---------- écran Veille ---------- */
 let lastState = null;
 
@@ -818,48 +892,35 @@ function renderForm(s) {
   $("#app").innerHTML = `
   ${last ? `<div class="notice" style="margin-bottom:16px"><span>Dernière veille <b>#${last.id}</b> · ${esc(last.filters_label)} · <span class="st ${last.status}">${STATUS[last.status] || last.status}</span></span><span class="spacer"></span><a class="btn sm" href="#session/${last.id}">Voir les résultats</a></div>` : ""}
   <form class="card" id="f" autocomplete="off">
-    <h2>Nouvelle veille</h2>
-    <label for="catq">Catégories Vinted <span class="muted" style="font-weight:500">(une ou plusieurs)</span></label>
+    <h2>⏱ Surveiller une niche</h2>
+    <p class="muted small" style="margin-top:-8px">Suit <b>toutes</b> les nouvelles annonces d'une niche et mesure exactement leurs favoris à 5, 10 et 15 min. Idéal pour confirmer une niche trouvée avec 🎯.</p>
+    <label for="catq">Catégorie(s)</label>
     <div class="catpick">
       <div class="chips" id="catsel"></div>
       <input type="text" id="catq" placeholder="Rechercher : sweat, baskets, robe, jean…" autocomplete="off">
       <div class="cattree" id="cattree"><div class="muted small" style="padding:8px">Chargement des catégories…</div></div>
     </div>
-    <div class="hint">Coche une catégorie parente pour inclure toutes ses sous-catégories. Chaque catégorie est surveillée séparément puis comparée.</div>
-    <div class="or">et / ou</div>
-    <label for="url">URL de recherche Vinted</label>
-    <input type="url" id="url" placeholder="https://www.vinted.fr/catalog?catalog[]=79&price_from=10&price_to=40" value="${esc(f.url || "")}">
-    <div class="hint">Fais ta recherche filtrée sur vinted.fr puis colle l'URL de la barre d'adresse.</div>
-    <div class="chips" id="parsed"></div>
-    <div class="or">ou en manuel</div>
-    <div class="fields">
-      <div><label for="cat">ID(s) de catégorie</label><input type="text" inputmode="numeric" id="cat" placeholder="ex : 79, 1206" value="${esc(f.catalog_id || "")}"></div>
+    <div class="fields" style="margin-top:12px">
       <div><label for="pmin">Prix min (€)</label><input type="number" id="pmin" min="0" step="1" value="${esc(f.price_min ?? "")}"></div>
       <div><label for="pmax">Prix max (€)</label><input type="number" id="pmax" min="0" step="1" value="${esc(f.price_max ?? "")}"></div>
+      <div><label for="dur">Durée</label><select id="dur">${[[30, "30 min"], [60, "1 heure"], [120, "2 heures"], [240, "4 heures"], [480, "8 heures"]].map(([v, l]) => `<option value="${v}" ${+f.duration_min === v ? "selected" : ""}>${l}</option>`).join("")}${![30, 60, 120, 240, 480].includes(+f.duration_min) ? `<option value="${f.duration_min}" selected>${f.duration_min} min</option>` : ""}</select></div>
     </div>
-    <div class="hint">Les champs manuels remplacent ceux de l'URL s'ils sont remplis.</div>
-    <h3 style="margin-top:22px">Paramètres de veille</h3>
-    <div class="fields">
-      <div><label for="dur">Durée de veille (min)</label><input type="number" id="dur" min="1" value="${f.duration_min}"></div>
-      <div><label for="win">Fenêtre de comptage (min)</label><input type="number" id="win" min="1" value="${f.window_min}"><div class="hint">Favoris mesurés à 5, 10 et 15 min</div></div>
-      <div><label for="thr">Seuil de hit (favoris)</label><input type="number" id="thr" min="1" value="${f.threshold}"></div>
-      <div><label for="int">Intervalle scans (s, min 45)</label><input type="number" id="int" min="45" value="${f.interval_s}"></div>
-    </div>
+    <details style="margin-top:14px"><summary class="small" style="cursor:pointer;font-weight:600">Réglages avancés</summary>
+      <label for="url" style="margin-top:10px">URL de recherche Vinted (filtres déjà réglés sur vinted.fr)</label>
+      <input type="url" id="url" placeholder="https://www.vinted.fr/catalog?catalog[]=79&price_from=10&price_to=40" value="${esc(f.url || "")}">
+      <div class="chips" id="parsed"></div>
+      <div class="fields" style="margin-top:10px">
+        <div><label for="cat">ID(s) de catégorie</label><input type="text" inputmode="numeric" id="cat" placeholder="ex : 79, 1206" value="${esc(f.catalog_id || "")}"></div>
+        <div><label for="win">Fenêtre (min)</label><input type="number" id="win" min="1" value="${f.window_min}"></div>
+        <div><label for="thr">Hit si favoris ≥</label><input type="number" id="thr" min="1" value="${f.threshold}"></div>
+        <div><label for="int">Scan toutes les (s)</label><input type="number" id="int" min="45" value="${f.interval_s}"></div>
+      </div>
+      <label class="check" style="margin-top:10px"><input type="checkbox" id="demo" ${f.demo ? "checked" : ""}><span>Démo (flux simulé, accéléré ×30)</span></label>
+    </details>
     <div class="hint" id="durhint"></div>
-    <div class="row" style="margin-top:20px">
-      <label class="check"><input type="checkbox" id="demo" ${f.demo ? "checked" : ""}><span>Mode démo<br><span class="muted small">Flux simulé, temps accéléré ×30 (1 min = 2 s). Aucun appel à Vinted.</span></span></label>
-      <span class="spacer"></span>
-      <button class="btn" id="go" type="submit">▶ Lancer la veille</button>
-    </div>
+    <div class="row" style="margin-top:14px"><span class="spacer"></span><button class="btn" id="go" type="submit">▶ Lancer la veille</button></div>
     <div id="ferr"></div>
-    ${INFO.storage === "browser" ? `<div class="hint" style="margin-top:12px">ℹ Mode navigateur : la veille tourne tant que cette page reste ouverte, et l'historique est enregistré sur cet appareil.</div>` : ""}
-  </form>
-  <div class="card small muted">
-    <b style="color:var(--text)">Comment ça marche ?</b> L'app scanne toutes les <i>nouvelles</i> annonces de la recherche,
-    relève leurs favoris à chaque cycle et retient le nombre de favoris pris pendant les <i>X</i> premières minutes.
-    Une annonce qui atteint le seuil est un <span class="chip orange">hit</span>. À la fin, les marques sont classées par
-    score = médiane des favoris × min(annonces, 5)/5 + 2 × hits.
-  </div>`;
+  </form>`;
   const form = $("#f");
   CATSEL = new Map(Object.entries(f.catalog_names || {}).filter(([k]) => (f.catalog_ids || []).includes(+k)).map(([k, v]) => [+k, v]));
   initCatPicker();

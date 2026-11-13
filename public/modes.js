@@ -111,23 +111,24 @@ async function viewSearch(token) {
   $("#app").innerHTML = `
   <form class="card" id="sf">
     <h2>🔎 Recherche instantanée</h2>
-    <p class="muted small" style="margin-top:-8px">Trouve tout de suite les annonces qui ont déjà beaucoup de favoris pour leur âge (tri « pertinence » de Vinted, jusqu'à 10 pages par catégorie).</p>
+    <p class="muted small" style="margin-top:-8px">Les annonces qui ont déjà beaucoup de favoris pour leur âge. Vide = toutes les grandes catégories.</p>
     <label>Catégories</label><div id="scat"></div>
     <div class="fields" style="margin-top:12px">
       <div><label>Favoris minimum</label><input type="number" id="sfav" min="0" value="${f.fav ?? 40}"></div>
-      <div><label>Postée il y a au moins (jours)</label><input type="number" id="sa0" min="0" step="0.5" value="${f.a0 ?? 1}"></div>
-      <div><label>… et au plus (jours)</label><input type="number" id="sa1" min="0" step="0.5" value="${f.a1 ?? 2}"></div>
-      <div><label>Prix min (€)</label><input type="number" id="spf" min="0" value="${f.pf ?? ""}"></div>
-      <div><label>Prix max (€)</label><input type="number" id="spt" min="0" value="${f.pt ?? ""}"></div>
-      <div><label>Pages par catégorie</label><input type="number" id="spg" min="1" max="10" value="${f.pg ?? 5}"></div>
+      <div><label>Postée il y a (jours) — de</label><input type="number" id="sa0" min="0" step="0.5" value="${f.a0 ?? 1}"></div>
+      <div><label>à</label><input type="number" id="sa1" min="0" step="0.5" value="${f.a1 ?? 2}"></div>
     </div>
-    <label style="margin-top:12px">État</label><div id="sst"></div>
-    <div class="row" style="margin-top:14px">
-      <label class="check"><input type="checkbox" id="sband" ${f.band ? "checked" : ""}><span>Élargir avec 3 tranches de prix<br><span class="muted small">×3 résultats parcourus (Vinted limite à 960 par recherche)</span></span></label>
-      <label class="check"><input type="checkbox" id="sdemo" ${f.demo ? "checked" : ""}><span>Démo<br><span class="muted small">données simulées</span></span></label>
-      <span class="spacer"></span><button class="btn" id="sgo">${SEARCH.running ? "■ Arrêter" : "🔎 Lancer la recherche"}</button>
-    </div>
-    <div class="hint">Âge estimé avec l'horloge des IDs Vinted (Vinted ne publie plus les dates) : précis à ±1 min sur la période où l'app a déjà tourné, ±15-20 % au-delà.</div>
+    <details style="margin-top:12px"><summary class="small" style="cursor:pointer;font-weight:600">Réglages avancés</summary>
+      <div class="fields" style="margin-top:10px">
+        <div><label>Prix min (€)</label><input type="number" id="spf" min="0" value="${f.pf ?? ""}"></div>
+        <div><label>Prix max (€)</label><input type="number" id="spt" min="0" value="${f.pt ?? ""}"></div>
+        <div><label>Pages par catégorie</label><input type="number" id="spg" min="1" max="10" value="${f.pg ?? 5}"></div>
+      </div>
+      <label style="margin-top:10px">État</label><div id="sst"></div>
+      <label class="check" style="margin-top:10px"><input type="checkbox" id="sband" ${f.band ? "checked" : ""}><span>Élargir avec 3 tranches de prix (×3 résultats parcourus)</span></label>
+      <label class="check" style="margin-top:6px"><input type="checkbox" id="sdemo" ${f.demo ? "checked" : ""}><span>Démo (données simulées)</span></label>
+    </details>
+    <div class="row" style="margin-top:14px"><span class="spacer"></span><button class="btn" id="sgo">${SEARCH.running ? "■ Arrêter" : "🔎 Lancer la recherche"}</button></div>
   </form>
   <div class="card" id="sres"></div>`;
   const picker = catPicker($("#scat"), new Map(Object.entries(f.cats || {}).map(([k, v]) => [+k, v])), {placeholder: "Vide = toutes les catégories principales"});
@@ -135,9 +136,8 @@ async function viewSearch(token) {
   const draw = () => {
     if (token !== renderToken) return;
     const r = [...SEARCH.results].sort((a, b) => b.favs - a.favs);
-    const brands = {};
-    r.forEach(i => { (brands[i.brand] ||= {brand: i.brand, n: 0, favs: []}).n++; brands[i.brand].favs.push(i.favs); });
-    const bl = Object.values(brands).map(b => ({...b, med: median(b.favs), max: Math.max(...b.favs)})).sort((a, b) => b.n - a.n || b.med - a.med).slice(0, 15);
+    const bl = [...groupBrands(r).values()].map(({name, items}) => ({brand: name, n: items.length, med: median(items.map(i => i.favs)), max: Math.max(...items.map(i => i.favs))}))
+      .sort((a, b) => b.n - a.n || b.med - a.med).slice(0, 15);
     $("#sres").innerHTML = `${SEARCH.running ? progressBar(SEARCH.done, SEARCH.total, SEARCH.log) : `<h2>Résultats ${r.length ? `(${r.length})` : ""}</h2>`}
       ${r.length ? `<div class="row" style="margin:10px 0"><span class="muted small">Marques les plus présentes :</span>${bl.map(b => `<span class="chip">${esc(b.brand)} · ${b.n} · méd. ${nf(b.med)} fav</span>`).join("")}
         <span class="spacer"></span><button class="btn ghost sm" id="scsv">⇩ CSV</button></div>
@@ -194,72 +194,107 @@ async function viewSearch(token) {
 }
 
 /* =====================================================================================
-   🎯 MÉTHODE EVAN : Demande → Flow rate → Concurrence → Win rate (verdict GO / NO-GO)
+   🎯 TROUVER DES NICHES (méthode Evan, version poussée)
+   Demande → Flow rate → Concurrence → Win rate, mais en score 0-100 : une marque connue n'est pas
+   éliminée si la demande est forte ; le flux (annonces publiées / jour) est mesuré pour chaque niche.
    ===================================================================================== */
-const EVAN_DEF = {fav: 20, days: 7, pages: 5, brandMin: 500, nicheMin: 500, flow2: 250, spread: 0.5, resellers: 0.35, maxBrands: 12, mainstream: 1000000,
+const EVAN_DEF = {fav: 20, days: 7, pages: 5, maxNiches: 30, subcats: true, maxSub: 15, flow2: 250, margin: 3,
   ultra: "Stone Island, Moncler, C.P. Company, Levi's, Lacoste, Patagonia, Nike, Carhartt"};
-const EVAN = {running: false, stop: false, cands: [], niches: [], log: "", done: 0, total: 0};
+const EVAN = {running: false, stop: false, cands: [], niches: [], log: "", done: 0, total: 0, sort: "score"};
+function subcatsOf(id, path, max) {   // feuilles sous une catégorie (sinon ses enfants directs)
+  let node = null; const find = (ns) => { for (const n of ns) { if (n.id === id) { node = n; return; } find(n.children); } }; find(CATTREE || []);
+  if (!node || !node.children.length) return [[id, path]];
+  const leaves = []; const walk = (n, p) => n.children.length ? n.children.forEach(c => walk(c, `${p} › ${c.title}`)) : leaves.push([n.id, p]);
+  node.children.forEach(c => walk(c, `${path} › ${c.title}`));
+  return leaves.length <= max ? leaves : node.children.slice(0, max).map(c => [c.id, `${path} › ${c.title}`]);
+}
+function nicheScore(n, cfg) {
+  const i = n.info || {}, why = [], plus = [];
+  // DEMANDE (40) : nombre d'articles très likés récents + favoris par jour
+  const D = Math.min(1, n.cands / 8) * 20 + Math.min(1, n.perDay / 25) * 20;
+  if (D >= 28) plus.push("forte demande"); else if (D < 12) why.push("demande faible");
+  // FLUX (25) : annonces publiées par jour dans la niche + volume dans la tranche de prix
+  const flow = i.flow_per_day ?? 0, tot = i.niche_price_total ?? 0;
+  const F = Math.min(1, flow / 20) * 15 + Math.min(1, tot / cfg.flow2) * 10;
+  if (flow >= 10) plus.push(`${nf(flow, 0)} annonces/jour`); else if (flow < 2) why.push("peu de flux (élargis : autre catégorie proche, autre genre)");
+  // COHÉRENCE DES PRIX / WIN RATE (20)
+  const sp = i.price_band_prices?.spread;
+  const P = sp == null ? 5 : Math.max(0, Math.min(1, (0.9 - sp) / 0.55)) * 20;
+  if (sp != null && sp <= 0.4) plus.push("prix cohérents"); else if (sp != null && sp > 0.7) why.push("prix dispersés (cibler un modèle / mot-clé)");
+  // CONCURRENCE (15) : revendeurs ; marque très connue = malus, sauf si la demande est forte
+  let C = 15 * (1 - Math.min(1, (i.resellers ?? 0.1) / 0.5));
+  if (n.ultra || n.mainstream) { C -= D >= 28 ? 3 : 10; (D >= 28 ? plus : why).push(D >= 28 ? "marque connue mais très demandée" : "marque très concurrentielle"); }
+  if ((i.resellers ?? 0) > 0.35) why.push("beaucoup de revendeurs");
+  const score = Math.round(Math.max(0, Math.min(100, D + F + P + C)));
+  const verdict = tot < 30 ? "NO-GO" : score >= 65 ? "GO" : score >= 45 ? "À tester" : "NO-GO";
+  if (tot < 30) why.unshift("presque rien à acheter");
+  return {score, verdict, why: why.join(" · "), plus: plus.join(" · ")};
+}
 async function viewEvan(token) {
   await loadCats();
   if (!EVAN.running && !EVAN.niches.length) { const last = await IDB.get("evan:last").catch(() => null); if (last) Object.assign(EVAN, last); }
   const f = (() => { try { return {...EVAN_DEF, ...JSON.parse(localStorage.getItem("vnw-evan"))}; } catch { return {...EVAN_DEF}; } })();
   $("#app").innerHTML = `
   <form class="card" id="ef">
-    <h2>🎯 Méthode Evan — trouver une niche rentable</h2>
-    <p class="muted small" style="margin-top:-8px">Les 4 filtres d'Evan Martin, automatisés : <b>Demande</b> (pertinence, &gt; ${f.fav} favoris, &lt; ${f.days} jours, pages 1-${f.pages})
-      → <b>Flow rate</b> (marque &gt; ${f.brandMin} annonces, marque × catégorie &gt; ${f.nicheMin}) → <b>Concurrence</b> (marques saturées ou grand public, revendeurs) → <b>Win rate</b> (prix cohérents, &gt; ${f.flow2} annonces dans la tranche).</p>
+    <h2>🎯 Trouver des niches</h2>
+    <p class="muted small" style="margin-top:-8px">Choisis une catégorie (même large, ex. « Chaussures femme ») : l'app passe toutes ses sous-catégories, garde les articles très likés et récents, puis note chaque niche marque × catégorie sur 100.</p>
     <label>Catégorie(s)</label><div id="ecat"></div>
     <div class="fields" style="margin-top:12px">
       <div><label>Prix min (€)</label><input type="number" id="epf" value="${f.pf ?? 20}"></div>
-      <div><label>Prix max (€)</label><input type="number" id="ept" value="${f.pt ?? 100}"></div>
+      <div><label>Prix max (€)</label><input type="number" id="ept" value="${f.pt ?? 150}"></div>
     </div>
-    <label style="margin-top:12px">État (« mettez toujours un filtre état »)</label><div id="est"></div>
-    <details style="margin-top:12px"><summary class="small" style="cursor:pointer;font-weight:600">Seuils (modifiables)</summary>
+    <label style="margin-top:12px">État</label><div id="est"></div>
+    <details style="margin-top:12px"><summary class="small" style="cursor:pointer;font-weight:600">Réglages avancés</summary>
       <div class="fields" style="margin-top:10px">
-        <div><label>Favoris min</label><input type="number" id="e_fav" value="${f.fav}"></div>
+        <div><label>Favoris min (demande)</label><input type="number" id="e_fav" value="${f.fav}"></div>
         <div><label>Âge max (jours)</label><input type="number" id="e_days" value="${f.days}"></div>
-        <div><label>Pages analysées</label><input type="number" id="e_pages" min="1" max="10" value="${f.pages}"></div>
-        <div><label>Flow marque min</label><input type="number" id="e_bm" value="${f.brandMin}"></div>
-        <div><label>Flow niche min</label><input type="number" id="e_nm" value="${f.nicheMin}"></div>
-        <div><label>Flow rate 2 min</label><input type="number" id="e_f2" value="${f.flow2}"></div>
-        <div><label>Dispersion prix max</label><input type="number" id="e_sp" step="0.05" value="${f.spread}"></div>
-        <div><label>Revendeurs max</label><input type="number" id="e_rs" step="0.05" value="${f.resellers}"></div>
-        <div><label>Marques analysées max</label><input type="number" id="e_mb" value="${f.maxBrands}"></div>
-        <div><label>Marque « grand public » au-delà de (annonces)</label><input type="number" id="e_main" value="${f.mainstream}"></div>
+        <div><label>Pages par catégorie</label><input type="number" id="e_pages" min="1" max="10" value="${f.pages}"></div>
+        <div><label>Niches mesurées max</label><input type="number" id="e_mn" min="5" max="80" value="${f.maxNiches}"></div>
+        <div><label>Sous-catégories max</label><input type="number" id="e_ms" min="1" max="40" value="${f.maxSub}"></div>
+        <div><label>Annonces min dans la tranche</label><input type="number" id="e_f2" value="${f.flow2}"></div>
+        <div><label>Marge visée (×)</label><input type="number" id="e_mg" step="0.5" value="${f.margin}"></div>
       </div>
-      <label style="margin-top:10px">Marques ultra concurrentielles (à éviter)</label><input type="text" id="e_ultra" value="${esc(f.ultra)}">
+      <label class="check" style="margin-top:10px"><input type="checkbox" id="e_sub" ${f.subcats ? "checked" : ""}><span>Inclure toutes les sous-catégories</span></label>
+      <label style="margin-top:10px">Marques très concurrentielles (malus, pas d'exclusion si forte demande)</label><input type="text" id="e_ultra" value="${esc(f.ultra)}">
+      <label class="check" style="margin-top:10px"><input type="checkbox" id="edemo" ${f.demo ? "checked" : ""}><span>Démo (données simulées)</span></label>
     </details>
-    <div class="row" style="margin-top:14px">
-      <label class="check"><input type="checkbox" id="edemo" ${f.demo ? "checked" : ""}><span>Démo<br><span class="muted small">données simulées</span></span></label>
-      <span class="spacer"></span><button class="btn" id="ego">${EVAN.running ? "■ Arrêter" : "🎯 Analyser"}</button>
-    </div>
+    <div class="row" style="margin-top:14px"><span class="spacer"></span><button class="btn" id="ego">${EVAN.running ? "■ Arrêter" : "🎯 Trouver des niches"}</button></div>
   </form>
   <div id="eres"></div>`;
-  const picker = catPicker($("#ecat"), new Map(Object.entries(f.cats || {}).map(([k, v]) => [+k, v])), {placeholder: "ex : baskets, manteaux femme, montres…"});
+  const picker = catPicker($("#ecat"), new Map(Object.entries(f.cats || {}).map(([k, v]) => [+k, v])), {placeholder: "ex : chaussures femme, sacs, montres…"});
   const st = statusPicker($("#est"), f.st || [2, 3]);
-  const ok = b => b ? `<span style="color:var(--ok);font-weight:700">✓</span>` : `<span style="color:var(--err);font-weight:700">✗</span>`;
+  const badge = n => `<span class="vbadge ${n.verdict === "GO" ? "go" : n.verdict === "À tester" ? "try" : n.verdict ? "no" : ""}">${n.verdict || "…"}${n.score != null ? ` · ${n.score}` : ""}</span>`;
   const draw = () => {
     if (token !== renderToken) return;
-    const go = EVAN.niches.filter(n => n.verdict === "GO");
+    const sorted = [...EVAN.niches].sort(EVAN.sort === "flow" ? (a, b) => (b.info?.flow_per_day ?? -1) - (a.info?.flow_per_day ?? -1)
+      : EVAN.sort === "demand" ? (a, b) => b.perDay - a.perDay : (a, b) => (b.score ?? -1) - (a.score ?? -1));
+    const go = EVAN.niches.filter(n => n.verdict === "GO").length, tr = EVAN.niches.filter(n => n.verdict === "À tester").length;
     $("#eres").innerHTML = `
     ${EVAN.running ? `<div class="card">${progressBar(EVAN.done, EVAN.total, EVAN.log)}</div>` : ""}
-    ${EVAN.niches.length ? `<div class="card"><div class="row"><h2 style="margin:0">Verdicts ${go.length ? `— <span style="color:var(--ok)">${go.length} niche(s) GO</span>` : ""}</h2><span class="spacer"></span><button class="btn ghost sm" id="ecsv">⇩ CSV</button></div>
-      <div class="hint" style="margin-bottom:10px">Vérifie ensuite à l'œil sur Vinted (lien « voir ») : fonds gris / dressings vitrines, articles de grossistes — ce que l'app ne peut pas juger.</div>
-      <div class="tw"><table><thead><tr><th>Niche</th><th>Verdict</th><th class="n">Demande</th><th>Flow rate</th><th>Concurrence</th><th>Win rate</th><th></th></tr></thead><tbody>
-      ${EVAN.niches.map(n => `<tr class="${n.verdict === "GO" ? "hit" : ""}">
-        <td><b>${esc(n.brand)}</b><div class="small muted">${esc(shortCat(n.cat))}</div></td>
-        <td style="white-space:normal;min-width:150px"><b style="color:${n.verdict === "GO" ? "var(--ok)" : n.verdict ? "var(--err)" : "var(--muted)"}">${n.verdict || "…"}</b>${n.why ? `<div class="small muted">${esc(n.why)}</div>` : ""}</td>
-        <td class="n">${n.cands} art. · max ${n.maxFav} fav</td>
-        <td>${n.info ? `${ok(n.g2)} marque ${nf(n.info.brand_items)} · niche ${n.info.niche_total >= 960 ? "960+" : nf(n.info.niche_total)}` : "…"}</td>
-        <td>${n.info ? `${ok(n.g3)} ${n.ultra ? "marque saturée" : n.mainstream ? "grand public" : "ok"} · revendeurs ${n.info.resellers != null ? Math.round(n.info.resellers * 100) + " %" : "–"}` : "…"}</td>
-        <td>${n.info ? `${ok(n.g4)} méd. ${eur(n.info.price_band_prices?.median)} · dispersion ${nf(n.info.price_band_prices?.spread, 2)} · ${n.info.niche_price_total >= 960 ? "960+" : nf(n.info.niche_price_total)} ann.` : "…"}</td>
-        <td>${n.url ? `<a href="${esc(n.url)}" target="_blank" rel="noopener">voir</a>` : ""}</td></tr>`).join("")}
-      </tbody></table></div></div>` : ""}
-    ${EVAN.cands.length ? `<div class="card"><h2>Étape 1 — Demande : ${EVAN.cands.length} articles (&gt; ${f.fav} favoris, &lt; ${f.days} j)</h2><div id="ecands"></div></div>` : ""}`;
+    ${EVAN.niches.length ? `<div class="card"><div class="row"><h2 style="margin:0">${EVAN.niches.length} niches — <span style="color:var(--ok)">${go} GO</span> · <span style="color:var(--warn)">${tr} à tester</span></h2><span class="spacer"></span>
+        <span class="small muted">Trier :</span>${[["score", "Score"], ["flow", "Flux"], ["demand", "Demande"]].map(([k, l]) => `<button type="button" class="btn sm ${EVAN.sort === k ? "" : "ghost"}" data-sort="${k}">${l}</button>`).join("")}
+        <button type="button" class="btn ghost sm" id="ecsv">⇩ CSV</button></div>
+      <div class="hint" style="margin:6px 0 12px">Prix d'achat cible = prix médian ÷ ${f.margin} (marge ×${f.margin}). Vérifie ensuite à l'œil sur Vinted : fonds gris / dressings vitrines, articles de grossistes.</div>
+      <div class="niches">${sorted.map(n => `
+        <div class="niche ${n.verdict === "GO" ? "go" : n.verdict === "À tester" ? "try" : ""}">
+          <div class="nh"><div><b>${esc(n.brand)}</b><div class="small muted">${esc(shortCat(n.cat))}</div></div>${badge(n)}</div>
+          <div class="ng">
+            <div><span>Demande</span><b>${n.cands} art.</b><small>${nf(n.perDay, 1)} fav/jour · max ${n.maxFav}</small></div>
+            <div><span>Flux</span><b>${n.info ? `${nf(n.info.flow_per_day, 0)}/jour` : "…"}</b><small>${n.info ? `${n.info.niche_price_total >= 960 ? "960+" : nf(n.info.niche_price_total)} en vente` : ""}</small></div>
+            <div><span>Prix revente</span><b>${n.info?.price_band_prices?.median != null ? eur(n.info.price_band_prices.median) : "…"}</b><small>${n.info?.price_band_prices?.p25 != null ? `${nf(n.info.price_band_prices.p25)}–${nf(n.info.price_band_prices.p75)} €` : ""}</small></div>
+            <div><span>Achat cible</span><b style="color:var(--ok)">${n.info?.price_band_prices?.median != null ? "≤ " + eur(n.info.price_band_prices.median / f.margin) : "…"}</b><small>${n.info ? `revendeurs ${Math.round((n.info.resellers ?? 0) * 100)} %` : ""}</small></div>
+          </div>
+          ${n.plus ? `<div class="small" style="color:var(--ok)">✓ ${esc(n.plus)}</div>` : ""}${n.why ? `<div class="small" style="color:var(--err)">✗ ${esc(n.why)}</div>` : ""}
+          <div class="row" style="margin-top:8px">${n.url ? `<a class="btn ghost sm" href="${esc(n.url)}" target="_blank" rel="noopener">Voir sur Vinted</a>` : ""}
+            ${n.urlBuy ? `<a class="btn ghost sm" href="${esc(n.urlBuy)}" target="_blank" rel="noopener">Annonces au prix d'achat</a>` : ""}</div>
+        </div>`).join("")}</div></div>` : ""}
+    ${EVAN.cands.length ? `<div class="card"><details><summary style="cursor:pointer"><b>Articles très demandés trouvés (${EVAN.cands.length})</b></summary><div id="ecands" style="margin-top:10px"></div></details></div>` : ""}`;
     if (EVAN.cands.length) { const t = () => { $("#ecands").innerHTML = itemsTable("evan-cands", EVAN.cands, [
       {key: "favs", label: "Favoris", num: true, fmt: i => `<b>${i.favs}</b>`}, {key: "age_min", label: "Âge", num: true, fmt: i => fmtAge(i.age_min)}]); bindTables($("#ecands"), t); }; t(); }
-    const c = $("#ecsv"); if (c) c.onclick = () => downloadCsv([["marque", "catégorie", "articles demandés", "favoris max", "annonces marque", "annonces niche", "annonces tranche de prix", "prix médian", "dispersion prix", "revendeurs", "marque saturée", "verdict", "raisons", "lien"],
-      ...EVAN.niches.map(n => [n.brand, n.cat, n.cands, n.maxFav, n.info?.brand_items, n.info?.niche_total, n.info?.niche_price_total, csvNum(n.info?.price_band_prices?.median), csvNum(n.info?.price_band_prices?.spread), csvNum(n.info?.resellers), n.ultra ? "oui" : "non", n.verdict, n.why, n.url])], "niches_methode_evan.csv");
+    document.querySelectorAll("[data-sort]").forEach(b => b.onclick = () => { EVAN.sort = b.dataset.sort; draw(); });
+    const c = $("#ecsv"); if (c) c.onclick = () => downloadCsv([["marque", "catégorie", "score", "verdict", "articles demandés", "favoris/jour", "favoris max", "flux (annonces/jour)", "annonces en vente (tranche)", "prix médian", "prix p25", "prix p75", "achat cible", "revendeurs", "points forts", "points faibles", "lien"],
+      ...EVAN.niches.map(n => [n.brand, n.cat, n.score, n.verdict, n.cands, csvNum(n.perDay, 1), n.maxFav, csvNum(n.info?.flow_per_day, 1), n.info?.niche_price_total, csvNum(n.info?.price_band_prices?.median), csvNum(n.info?.price_band_prices?.p25), csvNum(n.info?.price_band_prices?.p75),
+        n.info?.price_band_prices?.median != null ? csvNum(n.info.price_band_prices.median / f.margin) : "", csvNum(n.info?.resellers), n.plus, n.why, n.url])], "niches.csv");
   };
   XP.onStatus = m => { EVAN.log = m; draw(); };
   draw();
@@ -268,62 +303,63 @@ async function viewEvan(token) {
     if (EVAN.running) { EVAN.stop = true; return; }
     const num = id => $(id).value === "" ? null : Number($(id).value);
     const cfg = {cats: Object.fromEntries(picker.get()), pf: num("#epf"), pt: num("#ept"), st: st.get(), demo: $("#edemo").checked,
-      fav: num("#e_fav") ?? 20, days: num("#e_days") ?? 7, pages: Math.min(10, num("#e_pages") ?? 5), brandMin: num("#e_bm") ?? 500, nicheMin: num("#e_nm") ?? 500,
-      flow2: num("#e_f2") ?? 250, spread: num("#e_sp") ?? 0.5, resellers: num("#e_rs") ?? 0.35, maxBrands: num("#e_mb") ?? 12, ultra: $("#e_ultra").value,
-      mainstream: num("#e_main") ?? 1000000};
-    if (!picker.get().size) { alert("Choisis au moins une catégorie (Evan : « choisir une catégorie »)."); return; }
+      fav: num("#e_fav") ?? 20, days: num("#e_days") ?? 7, pages: Math.min(10, num("#e_pages") ?? 5), maxNiches: Math.min(80, num("#e_mn") ?? 30),
+      maxSub: num("#e_ms") ?? 15, flow2: num("#e_f2") ?? 250, margin: num("#e_mg") ?? 3, subcats: $("#e_sub").checked, ultra: $("#e_ultra").value};
+    if (!picker.get().size) { alert("Choisis au moins une catégorie."); return; }
     try { localStorage.setItem("vnw-evan", JSON.stringify(cfg)); } catch {}
     XP.demo = cfg.demo;
-    const ultra = cfg.ultra.split(",").map(x => norm(x.trim())).filter(Boolean);
-    Object.assign(EVAN, {running: true, stop: false, cands: [], niches: [], done: 0, total: picker.get().size * cfg.pages, log: "Étape 1 — Demande"});
+    const ultra = new Set(cfg.ultra.split(",").map(x => brandKey(x.trim())).filter(Boolean));
+    // catégories à parcourir (sous-catégories incluses)
+    const cats = []; for (const [id, p] of picker.get()) for (const c of (cfg.subcats ? subcatsOf(id, p, cfg.maxSub) : [[id, p]])) if (!cats.some(x => x[0] === c[0])) cats.push(c);
+    Object.assign(EVAN, {running: true, stop: false, cands: [], niches: [], done: 0, total: cats.length * cfg.pages + cfg.maxNiches, log: "Demande"});
     $("#ego").textContent = "■ Arrêter"; draw();
-    // Étape 1 : DEMANDE
+    // 1. DEMANDE : tri pertinence, articles très likés et récents
     const seen = new Set();
-    for (const [cid, cpath] of picker.get()) for (let p = 1; p <= cfg.pages && !EVAN.stop; p++) {
-      EVAN.log = `Étape 1 — Demande : ${shortCat(cpath)}, page ${p}`; draw();
-      const r = await XP.page({catalog_ids: [cid], price_from: cfg.pf, price_to: cfg.pt, status_ids: cfg.st}, "relevance", p);
-      EVAN.done++;
-      for (const it of r.items || []) {
-        if (it.promoted || seen.has(it.item_id)) continue; seen.add(it.item_id);
-        if (it.favs > cfg.fav && it.age_min / 1440 < cfg.days && it.brand && it.brand !== "(sans marque)") EVAN.cands.push({...it, cat: cpath, cid});
+    for (const [cid, cpath] of cats) {
+      for (let p = 1; p <= cfg.pages && !EVAN.stop; p++) {
+        EVAN.log = `Demande — ${shortCat(cpath)}, page ${p}`; draw();
+        const r = await XP.page({catalog_ids: [cid], price_from: cfg.pf, price_to: cfg.pt, status_ids: cfg.st}, "relevance", p);
+        EVAN.done++;
+        const its = r.items || [];
+        for (const it of its) {
+          if (it.promoted || seen.has(it.item_id)) continue; seen.add(it.item_id);
+          if (it.favs > cfg.fav && it.age_min / 1440 < cfg.days && it.brand && it.brand !== "(sans marque)") EVAN.cands.push({...it, cat: cpath, cid});
+        }
+        await sleep(XP.demo ? 30 : 800 + Math.random() * 600);
+        if (its.length < 80) { EVAN.done += cfg.pages - p; break; }   // plus de résultats dans cette catégorie
       }
-      await sleep(XP.demo ? 50 : 900 + Math.random() * 700);
     }
-    // niches candidates = marque × catégorie, classées par nombre d'articles demandés
+    // niches = marque (regroupée) × catégorie, classées par demande
     const g = new Map();
-    for (const c of EVAN.cands) { const k = `${norm(c.brand)}|${c.cid}`; if (!g.has(k)) g.set(k, {brand: c.brand, cat: c.cat, cid: c.cid, items: []}); g.get(k).items.push(c); }
-    EVAN.niches = [...g.values()].map(n => ({...n, cands: n.items.length, maxFav: Math.max(...n.items.map(i => i.favs))}))
-      .sort((a, b) => b.cands - a.cands || b.maxFav - a.maxFav).slice(0, cfg.maxBrands);
+    for (const c of EVAN.cands) { const k = `${brandKey(c.brand)}|${c.cid}`; if (!g.has(k)) g.set(k, {cat: c.cat, cid: c.cid, items: []}); g.get(k).items.push(c); }
+    EVAN.niches = [...g.values()].map(n => {
+      const names = {}; n.items.forEach(i => names[i.brand] = (names[i.brand] || 0) + 1);
+      const perDay = median(n.items.map(i => i.favs / Math.max(i.age_min / 1440, 0.1)));
+      return {...n, brand: Object.entries(names).sort((a, b) => b[1] - a[1])[0][0], cands: n.items.length, maxFav: Math.max(...n.items.map(i => i.favs)), perDay};
+    }).sort((a, b) => (b.cands * 2 + b.perDay / 5) - (a.cands * 2 + a.perDay / 5)).slice(0, cfg.maxNiches);
     EVAN.total = EVAN.done + EVAN.niches.length; draw();
-    // Étapes 2-4 : FLOW RATE, CONCURRENCE, WIN RATE
+    // 2-4. FLUX, CONCURRENCE, PRIX : mesures puis score
     for (const n of EVAN.niches) {
       if (EVAN.stop) break;
-      EVAN.log = `Étapes 2-4 — ${n.brand} (${shortCat(n.cat)})`; draw();
+      EVAN.log = `Mesure — ${n.brand} (${shortCat(n.cat)})`; draw();
       const info = await XP.brand({brand: n.brand, catalog_id: n.cid, price_from: cfg.pf, price_to: cfg.pt, status_ids: cfg.st});
       EVAN.done++;
       if (info.status !== "ok" || info.error) { n.verdict = "?"; n.why = info.error || info.message || "mesure impossible"; draw(); continue; }
-      n.info = info;
-      n.ultra = info.ultra_competitive || ultra.includes(norm(info.brand_title || n.brand));
-      // Evan : « les marques connues ne sont PAS des niches » -> au-delà d'un volume d'annonces, marque grand public.
-      n.mainstream = cfg.mainstream && (info.brand_items || 0) > cfg.mainstream;
-      n.g2 = (info.brand_items || 0) > cfg.brandMin && (info.niche_total || 0) > cfg.nicheMin;
-      n.g3 = !n.ultra && !n.mainstream && (info.resellers == null || info.resellers <= cfg.resellers);
-      const sp = info.price_band_prices?.spread;
-      n.g4 = sp != null && sp <= cfg.spread && (info.niche_price_total || 0) > cfg.flow2;
-      const why = [];
-      if (!n.g2) why.push((info.brand_items || 0) <= cfg.brandMin ? "marque trop rare" : "trop peu d'annonces dans la niche");
-      if (!n.g3) why.push(n.ultra ? "marque ultra concurrentielle" : n.mainstream ? "marque grand public (pas une niche)" : "beaucoup de revendeurs");
-      if (!n.g4) why.push(sp == null || sp > cfg.spread ? "prix incohérents (cibler un modèle / A-B test prix)" : "flow rate 2 insuffisant");
-      n.verdict = why.length ? "NO-GO" : "GO"; n.why = why.join(" · ");
+      n.info = info; delete n.items;
+      n.ultra = info.ultra_competitive || ultra.has(brandKey(info.brand_title || n.brand));
+      n.mainstream = (info.brand_items || 0) > 1_000_000;
+      Object.assign(n, nicheScore(n, cfg));
       const q = new URLSearchParams(); q.append("catalog[]", n.cid); q.append("brand_ids[]", info.brand_id);
-      cfg.st.forEach(s => q.append("status_ids[]", s)); if (cfg.pf != null) q.set("price_from", cfg.pf); if (cfg.pt != null) q.set("price_to", cfg.pt); q.set("order", "relevance");
-      n.url = `https://www.vinted.fr/catalog?${q}`;
+      cfg.st.forEach(s => q.append("status_ids[]", s)); q.set("order", "newest_first");
+      const q1 = new URLSearchParams(q); if (cfg.pf != null) q1.set("price_from", cfg.pf); if (cfg.pt != null) q1.set("price_to", cfg.pt);
+      n.url = `https://www.vinted.fr/catalog?${q1}`;
+      const med = info.price_band_prices?.median;
+      if (med) { const q2 = new URLSearchParams(q); q2.set("price_to", Math.round(med / cfg.margin)); n.urlBuy = `https://www.vinted.fr/catalog?${q2}`; }
       draw();
-      await sleep(XP.demo ? 50 : 1200 + Math.random() * 800);
+      await sleep(XP.demo ? 30 : 900 + Math.random() * 600);
     }
-    EVAN.niches.sort((a, b) => (b.verdict === "GO") - (a.verdict === "GO") || b.cands - a.cands);
     EVAN.running = false; await IDB.set("evan:last", {cands: EVAN.cands, niches: EVAN.niches.map(({items, ...n}) => n)}).catch(() => {});
-    if (token === renderToken) { $("#ego").textContent = "🎯 Analyser"; draw(); }
+    if (token === renderToken) { $("#ego").textContent = "🎯 Trouver des niches"; draw(); }
   };
 }
 
@@ -357,15 +393,17 @@ function radarItems(d) {
     return {...i, f15: e.v, exact: e.exact, cur: last[1], age_min: last[0] / 60, rate: last[1] / Math.max(1, last[0] / 60), hot: e.v != null && e.v >= d.cfg.hot}; });
 }
 function radarBrands(d) {
-  const items = radarItems(d), g = {};
-  for (const i of items) (g[i.brand] ||= []).push(i);
-  return Object.entries(g).filter(([b]) => b && b !== "(sans marque)").map(([brand, its]) => {
-    const f = its.filter(i => i.f15 != null).map(i => i.f15), hot = its.filter(i => i.hot).length, supply = d.supply[brand] || 0;
+  const items = radarItems(d);
+  // offre vue (plus récentes) regroupée par marque avec la même clé
+  const supplyBy = {}; for (const [b, n] of Object.entries(d.supply || {})) supplyBy[brandKey(b)] = (supplyBy[brandKey(b)] || 0) + n;
+  return [...groupBrands(items)].filter(([k]) => k !== "(sans marque)").map(([k, {name: brand, items: its}]) => {
+    const f = its.filter(i => i.f15 != null).map(i => i.f15), hot = its.filter(i => i.hot).length, supply = supplyBy[k] || 0;
+    const variants = [...new Set(its.map(i => i.brand))];
     const cats = {}; its.forEach(i => cats[i.cat] = (cats[i.cat] || 0) + 1);
     const topCat = Object.entries(cats).sort((a, b) => b[1] - a[1])[0]?.[0] || "";
     return {brand, n: its.length, hot, f15_med: median(f), f15_max: f.length ? Math.max(...f) : 0, f15_mean: f.length ? r1(mean(f), 1) : 0,
       rate: r1(mean(its.map(i => i.rate)), 2), price: median(its.map(i => i.price).filter(Boolean)), supply,
-      hit_rate: supply ? r1(100 * hot / Math.max(supply, hot), 1) : null, cat: topCat,
+      hit_rate: supply ? r1(100 * hot / Math.max(supply, hot), 1) : null, cat: topCat, variants,
       score: r1(median(f) * Math.min(its.length, 5) / 5 + 2 * hot, 2)};
   }).sort((a, b) => b.score - a.score);
 }
@@ -436,7 +474,7 @@ function drawRadar(token) {
   const t = () => {
     $("#rtb").innerHTML = table("radar-brands", [
       {key: "rank", label: "#", num: true, nosort: true, fmt: r => r._rank},
-      {key: "brand", label: "Marque", fmt: r => `<b>${esc(r.brand)}</b>`},
+      {key: "brand", label: "Marque", fmt: r => `<b>${esc(r.brand)}</b>${r.variants?.length > 1 ? ` <span class="small muted" title="${esc(r.variants.join(", "))}">+${r.variants.length - 1} variante(s)</span>` : ""}`},
       {key: "score", label: "Score", num: true, fmt: r => `<span class="score">${nf(r.score, 1)}</span>`},
       {key: "hot", label: "🔥", num: true}, {key: "n", label: "Captées", num: true},
       {key: "f15_med", label: `Fav. ${d.cfg.win} min méd.`, num: true, fmt: r => nf(r.f15_med, 1)},
@@ -462,27 +500,31 @@ async function viewRadar(token) {
   const f = RADAR.data?.cfg || (() => { try { return JSON.parse(localStorage.getItem("vnw-radar")) || {}; } catch { return {}; } })();
   $("#app").innerHTML = `
   <form class="card" id="rf">
-    <h2>📡 Radar — veille continue, toutes catégories</h2>
-    <p class="muted small" style="margin-top:-8px">Parcourt en boucle les catégories (tri « pertinence » de Vinted, qui fait remonter les annonces récentes qui plaisent), repère les annonces de moins de ${f.win ?? 15} min, mesure leurs favoris à ${f.win ?? 15} min et classe les marques sur la durée (heures, jours). Garde la page ouverte.</p>
+    <h2>📡 Radar — ce qui cartonne en ce moment</h2>
+    <p class="muted small" style="margin-top:-8px">Tourne en continu sur tout Vinted (ou tes catégories) : repère les annonces qui prennent le plus de favoris dans leurs ${f.win ?? 15} premières minutes et classe les marques sur la durée. Laisse la page ouverte.</p>
     <label>Catégories surveillées</label><div id="rcat"></div>
     <div class="fields" style="margin-top:12px">
-      <div><label>Fenêtre (min)</label><input type="number" id="rwin" min="5" max="60" value="${f.win ?? 15}"></div>
-      <div><label>🔥 si favoris ≥</label><input type="number" id="rhot" min="1" value="${f.hot ?? 20}"></div>
-      <div><label>Pages par catégorie</label><input type="number" id="rpg" min="1" max="5" value="${f.pages ?? 3}"></div>
-      <div><label>Secondes entre requêtes</label><input type="number" id="rpace" min="4" value="${f.pace ?? 8}"></div>
       <div><label>Prix min (€)</label><input type="number" id="rpf" value="${f.pf ?? ""}"></div>
       <div><label>Prix max (€)</label><input type="number" id="rpt" value="${f.pt ?? ""}"></div>
-      <div><label>Durée max (h, vide = illimitée)</label><input type="number" id="rh" min="0" step="0.5" value="${f.hours ?? ""}"></div>
+      <div><label>🔥 si favoris à 15 min ≥</label><input type="number" id="rhot" min="1" value="${f.hot ?? 20}"></div>
     </div>
-    <label style="margin-top:12px">État</label><div id="rst"></div>
+    <details style="margin-top:12px"><summary class="small" style="cursor:pointer;font-weight:600">Réglages avancés</summary>
+      <div class="fields" style="margin-top:10px">
+        <div><label>Fenêtre (min)</label><input type="number" id="rwin" min="5" max="60" value="${f.win ?? 15}"></div>
+        <div><label>Pages par catégorie</label><input type="number" id="rpg" min="1" max="5" value="${f.pages ?? 3}"></div>
+        <div><label>Secondes entre requêtes</label><input type="number" id="rpace" min="4" value="${f.pace ?? 8}"></div>
+        <div><label>Durée max (h, vide = illimitée)</label><input type="number" id="rh" min="0" step="0.5" value="${f.hours ?? ""}"></div>
+      </div>
+      <label style="margin-top:10px">État</label><div id="rst"></div>
+      <label class="check" style="margin-top:10px"><input type="checkbox" id="rdemo" ${f.demo ? "checked" : ""}><span>Démo (données simulées)</span></label>
+      <div class="hint" id="rcost"></div>
+    </details>
     <div class="row" style="margin-top:14px">
-      <label class="check"><input type="checkbox" id="rdemo" ${f.demo ? "checked" : ""}><span>Démo<br><span class="muted small">données simulées</span></span></label>
       <button type="button" class="btn ${ALERTS.on ? "" : "ghost"} sm" id="ralerts">${ALERTS.on ? "🔔 Alertes activées" : "🔕 Activer les alertes"}</button>
       <span class="spacer"></span>
       ${RADAR.data && !RADAR.running ? `<button type="button" class="btn ghost" id="rreset">Nouveau radar</button>` : ""}
       <button class="btn" id="rgo">${RADAR.running ? "■ Arrêter" : RADAR.data ? "▶ Reprendre" : "📡 Démarrer le radar"}</button>
     </div>
-    <div class="hint" id="rcost"></div>
   </form>
   <div id="rres">${RADAR.data ? "" : `<div class="card empty">Le radar n'a pas encore tourné.</div>`}</div>`;
   const picker = catPicker($("#rcat"), new Map(Object.entries(f.cats || {}).map(([k, v]) => [+k, v])), {placeholder: "Vide = les 9 grandes catégories de Vinted"});
