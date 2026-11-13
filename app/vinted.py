@@ -218,12 +218,18 @@ class VintedClient:
             h["x-anon-id"] = anon
         return h
 
-    def fetch_page(self, filters: dict, page: int) -> list[dict]:
+    def fetch_page(self, filters: dict, page: int, extra: dict | None = None) -> list[dict]:
         if not self.warmed or not self._cookie("access_token_web"):
             self.warmup()
         for attempt in (1, 2):
             try:
-                r = self.session.get(API, params=api_params(filters, page), headers=self._headers(), timeout=20)
+                params = api_params(filters, page)
+                for k, v in (extra or {}).items():  # diagnostic uniquement
+                    if v is None:
+                        params.pop(k, None)
+                    else:
+                        params[k] = v
+                r = self.session.get(API, params=params, headers=self._headers(), timeout=20)
             except Exception as e:  # réseau
                 raise ApiError(f"Erreur réseau : {e}") from e
             if r.status_code in (401, 403) and attempt == 1:

@@ -188,6 +188,8 @@ class ScanBody(BaseModel):
     cookies: dict | None = None
     demo: DemoParams | None = None
     debug: bool = False
+    debug_params: dict | None = None
+    debug_page: int = 1
 
 
 @app.post("/api/scan")
@@ -207,10 +209,10 @@ def scan(body: ScanBody):
     res = {"status": "ok"}
     if body.debug and not body.demo:  # diagnostic : forme brute d'une annonce (sans le vendeur)
         try:
-            raw = client.fetch_page(body.filters, 1)
+            raw = client.fetch_page(body.filters, body.debug_page, body.debug_params)
             sample = {k: v for k, v in (raw[0] if raw else {}).items() if k not in ("user", "seller")}
             return {"status": "ok", "count": len(raw), "sample": sample,
-                    "ids": [r.get("id") for r in raw[:30]]}
+                    "ids": [r.get("id") for r in raw], "promoted": [bool(r.get("promoted")) for r in raw]}
         except Exception as e:
             return {"status": "error", "message": f"{type(e).__name__}: {e}"}
     try:
