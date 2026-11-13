@@ -19,14 +19,14 @@ La fenêtre de `start.bat` affiche une adresse du type `http://192.168.1.23:8000
 téléphone connecté **au même Wi-Fi**. Si ça ne charge pas, autorise Python quand le pare-feu Windows
 le demande (réseau **privé**), ou relance `start.bat` après avoir accepté.
 
-## Les modes
+## Les modes (page d'accueil « Que veux-tu faire ? »)
 
 | Onglet | À quoi ça sert |
 |---|---|
-| **Veille** | Suivre toutes les nouvelles annonces d'une ou plusieurs catégories pendant X min et mesurer leurs favoris à 5/10/15 min (le plus précis). |
-| **📡 Radar** | Veille **continue sur toutes les catégories** (heures, jours) : le tri « pertinence » de Vinted fait remonter les annonces récentes qui plaisent ; le radar repère celles de moins de 15 min, mesure leurs favoris à 15 min et construit le **classement des marques** (🔥, favoris médians, fav/min, offre vue, ratio demande/offre). Alertes possibles. |
-| **🔎 Recherche** | Recherche instantanée, ex. **≥ 40 favoris postées il y a 1 à 2 jours**, sur une ou plusieurs catégories (jusqu'à 10 pages, tranches de prix pour élargir). |
-| **🎯 Méthode Evan** | Les 4 filtres d'Evan Martin automatisés : **Demande** (pertinence, > 20 favoris, < 7 jours, pages 1-5) → **Flow rate** (marque > 500 annonces, marque × catégorie > 500) → **Concurrence** (marques ultra concurrentielles ou grand public, part de revendeurs) → **Win rate** (prix cohérents, > 250 annonces dans la tranche). Verdict GO / NO-GO motivé + lien Vinted pour la vérification visuelle (fonds gris, grossistes). Seuils modifiables. |
+| **🎯 Niches** | Choisis une catégorie (même large, ex. « Chaussures femme ») : l'app passe **toutes ses sous-catégories**, garde les articles très likés et récents (méthode Evan), puis **note chaque niche marque × catégorie sur 100** : demande, **flux (annonces publiées / jour)**, cohérence des prix, concurrence. Verdict **GO / À tester / NO-GO**, **prix d'achat cible** (prix médian ÷ marge ×3), liens Vinted. Une marque connue n'est pas éliminée si la demande est forte. Jusqu'à 80 niches par analyse. |
+| **📡 Radar** | Tourne en continu sur tout Vinted (ou tes catégories) : annonces qui prennent le plus de favoris dans leurs 15 premières minutes, **classement des marques sur la durée** (variantes regroupées : « Polo Ralph Lauren » = « Ralph Lauren »). |
+| **🔎 Recherche** | Ex. **≥ 40 favoris postées il y a 1 à 2 jours**, sur les catégories de ton choix. |
+| **⏱ Veille** | Mesure exacte des favoris à 5/10/15 min de chaque nouvelle annonce d'une niche, alertes en direct. Pour confirmer une niche trouvée avec 🎯. |
 
 **Âge des annonces sur plusieurs jours** : Vinted ne donne plus aucune date. L'app utilise une « horloge des
 IDs » : elle note (heure, plus haut numéro d'annonce) à chaque recherche et convertit un numéro en date. Sur la
