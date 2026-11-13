@@ -264,8 +264,24 @@ class VintedClient:
                 data = r.json()
             except Exception as e:
                 raise ApiError("Réponse non JSON") from e
+            self.last_pagination = data.get("pagination") or {}
             return data.get("items") or []
         raise ApiError("Jeton refusé malgré le rafraîchissement des cookies")
+
+    def get_json(self, url: str, params: dict | None = None, api_host: bool = False) -> dict:
+        """GET JSON sur un autre point d'accès Vinted (marques, filtres…)."""
+        if not self.warmed or not self._cookie("access_token_web"):
+            self.warmup()
+        h = self._headers() if api_host else {"Accept": "application/json, text/plain, */*", "Referer": BASE + "/"}
+        try:
+            r = self.session.get(url, params=params or {}, headers=h, timeout=20)
+        except Exception as e:
+            raise ApiError(f"Erreur réseau : {e}") from e
+        if r.status_code in (403, 429):
+            raise RateLimited(r.status_code)
+        if r.status_code != 200:
+            raise ApiError(f"HTTP {r.status_code} sur {url}")
+        return r.json()
 
 
 # ---------------------------------------------------------------- mode démo

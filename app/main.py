@@ -153,7 +153,8 @@ def info():
 async def browser_mode_guard(request: Request, call_next):
     """En mode navigateur, seules les routes sans état sont disponibles."""
     p = request.url.path
-    if BROWSER_MODE and p.startswith("/api/") and p not in ("/api/info", "/api/scan", "/api/parse-url", "/api/categories", "/api/debug/raw"):
+    if BROWSER_MODE and p.startswith("/api/") and p not in ("/api/info", "/api/scan", "/api/parse-url", "/api/categories",
+                                                             "/api/debug/raw", "/api/explore", "/api/brand-info", "/api/idclock"):
         return JSONResponse({"detail": "Mode navigateur : cette route est gérée par la page."}, status_code=400)
     return await call_next(request)
 
@@ -229,6 +230,72 @@ class ScanBody(BaseModel):
     debug: bool = False
     debug_params: dict | None = None
     debug_page: int = 1
+
+
+class ExploreBody(BaseModel):
+    filters: dict = {}
+    order: str = "relevance"
+    page: int = Field(1, ge=1, le=10)
+    anchors: list[list[float]] = []   # repères (heure, ID) mémorisés par le navigateur
+    cookies: dict | None = None
+    demo: bool = False
+
+
+def _explore_client(cookies, demo: bool):
+    from . import explore
+    return explore.DemoExplore(time.time()) if demo else vinted.VintedClient(cookies)
+
+
+@app.post("/api/explore")
+def explore_page(body: ExploreBody):
+    """Une page de recherche (pertinence ou plus récentes) avec l'âge estimé de chaque annonce."""
+    from . import explore
+    if body.order not in ("relevance", "newest_first", "price_low_to_high", "price_high_to_low"):
+        raise HTTPException(400, "Tri inconnu")
+    client = _explore_client(body.cookies, body.demo)
+    try:
+        res = explore.page(client, body.filters, body.order, body.page, body.anchors)
+        res["status"] = "ok"
+    except vinted.RateLimited as e:
+        return {"status": "rate_limited", "http": e.status, "items": []}
+    except vinted.PageLimit:
+        return {"status": "ok", "items": [], "total": 0, "page": body.page}
+    except vinted.ApiError as e:
+        return {"status": "error", "message": str(e), "items": []}
+    res["cookies"] = client.export_cookies() if not body.demo and getattr(client, "warmed", False) else None
+    return res
+
+
+class BrandBody(BaseModel):
+    brand: str
+    catalog_id: int | None = None
+    price_from: float | None = None
+    price_to: float | None = None
+    status_ids: list[int] = []
+    cookies: dict | None = None
+    demo: bool = False
+
+
+@app.post("/api/brand-info")
+def brand_info(body: BrandBody):
+    """Mesures d'une niche marque × catégorie (méthode d'Evan : flow rate, concurrence, cohérence des prix)."""
+    from . import explore
+    client = _explore_client(body.cookies, body.demo)
+    try:
+        res = explore.brand_info(client, body.brand, body.catalog_id, body.price_from, body.price_to, body.status_ids)
+        res["status"] = "ok"
+    except vinted.RateLimited as e:
+        return {"status": "rate_limited", "http": e.status}
+    except vinted.ApiError as e:
+        return {"status": "error", "message": str(e)}
+    res["cookies"] = client.export_cookies() if not body.demo and getattr(client, "warmed", False) else None
+    return res
+
+
+@app.get("/api/idclock")
+def idclock_points():
+    from . import idclock
+    return {"points": idclock.points()[-500:], "coverage_start": idclock.coverage_start()}
 
 
 class RawBody(BaseModel):
@@ -308,6 +375,9 @@ def scan(body: ScanBody):
         res = {"status": "error", "message": str(e)}
     keep = ("item_id", "title", "brand", "price", "currency", "size", "condition", "url", "photo_url",
             "posted_at", "favs", "views", "seen_at", "promoted", "cat")
+    if not body.demo and meta.get("t_first") and meta.get("max_first"):
+        from . import idclock
+        idclock.add([[meta["t_first"], meta["max_first"]]])
     res.update(t_first=meta.get("t_first"), max_first=meta.get("max_first"), stale=meta.get("stale", 0),
                bands=meta.get("bands", 1), limited=bool(meta.get("limited")),
                probe=bool(meta.get("probe")), probe_hit=bool(meta.get("probe_hit")))
