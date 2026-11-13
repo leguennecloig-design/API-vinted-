@@ -106,6 +106,7 @@ const progressBar = (done, total, text) => `<div class="phase"><b>${text}</b><sp
 const SEARCH = {running: false, stop: false, results: [], seen: new Set(), log: ""};
 async function viewSearch(token) {
   await loadCats();
+  if (!SEARCH.running && !SEARCH.results.length) { const last = await IDB.get("search:last").catch(() => null); if (last) SEARCH.results = last; }
   const f = (() => { try { return JSON.parse(localStorage.getItem("vnw-search")) || {}; } catch { return {}; } })();
   $("#app").innerHTML = `
   <form class="card" id="sf">
@@ -187,24 +188,26 @@ async function viewSearch(token) {
       draw();
       await sleep(XP.demo ? 50 : 900 + Math.random() * 700);
     }
-    SEARCH.running = false; SEARCH.log = ""; if (token === renderToken) { $("#sgo").textContent = "🔎 Lancer la recherche"; draw(); }
+    SEARCH.running = false; SEARCH.log = ""; await IDB.set("search:last", SEARCH.results).catch(() => {});
+    if (token === renderToken) { $("#sgo").textContent = "🔎 Lancer la recherche"; draw(); }
   };
 }
 
 /* =====================================================================================
    🎯 MÉTHODE EVAN : Demande → Flow rate → Concurrence → Win rate (verdict GO / NO-GO)
    ===================================================================================== */
-const EVAN_DEF = {fav: 20, days: 7, pages: 5, brandMin: 500, nicheMin: 500, flow2: 250, spread: 0.5, resellers: 0.35, maxBrands: 12,
+const EVAN_DEF = {fav: 20, days: 7, pages: 5, brandMin: 500, nicheMin: 500, flow2: 250, spread: 0.5, resellers: 0.35, maxBrands: 12, mainstream: 1000000,
   ultra: "Stone Island, Moncler, C.P. Company, Levi's, Lacoste, Patagonia, Nike, Carhartt"};
 const EVAN = {running: false, stop: false, cands: [], niches: [], log: "", done: 0, total: 0};
 async function viewEvan(token) {
   await loadCats();
+  if (!EVAN.running && !EVAN.niches.length) { const last = await IDB.get("evan:last").catch(() => null); if (last) Object.assign(EVAN, last); }
   const f = (() => { try { return {...EVAN_DEF, ...JSON.parse(localStorage.getItem("vnw-evan"))}; } catch { return {...EVAN_DEF}; } })();
   $("#app").innerHTML = `
   <form class="card" id="ef">
     <h2>🎯 Méthode Evan — trouver une niche rentable</h2>
     <p class="muted small" style="margin-top:-8px">Les 4 filtres d'Evan Martin, automatisés : <b>Demande</b> (pertinence, &gt; ${f.fav} favoris, &lt; ${f.days} jours, pages 1-${f.pages})
-      → <b>Flow rate</b> (marque &gt; ${f.brandMin} annonces, marque × catégorie &gt; ${f.nicheMin}) → <b>Concurrence</b> (marques saturées, revendeurs) → <b>Win rate</b> (prix cohérents, &gt; ${f.flow2} annonces dans la tranche).</p>
+      → <b>Flow rate</b> (marque &gt; ${f.brandMin} annonces, marque × catégorie &gt; ${f.nicheMin}) → <b>Concurrence</b> (marques saturées ou grand public, revendeurs) → <b>Win rate</b> (prix cohérents, &gt; ${f.flow2} annonces dans la tranche).</p>
     <label>Catégorie(s)</label><div id="ecat"></div>
     <div class="fields" style="margin-top:12px">
       <div><label>Prix min (€)</label><input type="number" id="epf" value="${f.pf ?? 20}"></div>
@@ -222,6 +225,7 @@ async function viewEvan(token) {
         <div><label>Dispersion prix max</label><input type="number" id="e_sp" step="0.05" value="${f.spread}"></div>
         <div><label>Revendeurs max</label><input type="number" id="e_rs" step="0.05" value="${f.resellers}"></div>
         <div><label>Marques analysées max</label><input type="number" id="e_mb" value="${f.maxBrands}"></div>
+        <div><label>Marque « grand public » au-delà de (annonces)</label><input type="number" id="e_main" value="${f.mainstream}"></div>
       </div>
       <label style="margin-top:10px">Marques ultra concurrentielles (à éviter)</label><input type="text" id="e_ultra" value="${esc(f.ultra)}">
     </details>
@@ -241,14 +245,14 @@ async function viewEvan(token) {
     ${EVAN.running ? `<div class="card">${progressBar(EVAN.done, EVAN.total, EVAN.log)}</div>` : ""}
     ${EVAN.niches.length ? `<div class="card"><div class="row"><h2 style="margin:0">Verdicts ${go.length ? `— <span style="color:var(--ok)">${go.length} niche(s) GO</span>` : ""}</h2><span class="spacer"></span><button class="btn ghost sm" id="ecsv">⇩ CSV</button></div>
       <div class="hint" style="margin-bottom:10px">Vérifie ensuite à l'œil sur Vinted (lien « voir ») : fonds gris / dressings vitrines, articles de grossistes — ce que l'app ne peut pas juger.</div>
-      <div class="tw"><table><thead><tr><th>Niche</th><th class="n">Demande</th><th>Flow rate</th><th>Concurrence</th><th>Win rate</th><th>Verdict</th><th></th></tr></thead><tbody>
+      <div class="tw"><table><thead><tr><th>Niche</th><th>Verdict</th><th class="n">Demande</th><th>Flow rate</th><th>Concurrence</th><th>Win rate</th><th></th></tr></thead><tbody>
       ${EVAN.niches.map(n => `<tr class="${n.verdict === "GO" ? "hit" : ""}">
         <td><b>${esc(n.brand)}</b><div class="small muted">${esc(shortCat(n.cat))}</div></td>
+        <td style="white-space:normal;min-width:150px"><b style="color:${n.verdict === "GO" ? "var(--ok)" : n.verdict ? "var(--err)" : "var(--muted)"}">${n.verdict || "…"}</b>${n.why ? `<div class="small muted">${esc(n.why)}</div>` : ""}</td>
         <td class="n">${n.cands} art. · max ${n.maxFav} fav</td>
         <td>${n.info ? `${ok(n.g2)} marque ${nf(n.info.brand_items)} · niche ${n.info.niche_total >= 960 ? "960+" : nf(n.info.niche_total)}` : "…"}</td>
-        <td>${n.info ? `${ok(n.g3)} ${n.ultra ? "marque saturée" : "ok"} · revendeurs ${n.info.resellers != null ? Math.round(n.info.resellers * 100) + " %" : "–"}` : "…"}</td>
+        <td>${n.info ? `${ok(n.g3)} ${n.ultra ? "marque saturée" : n.mainstream ? "grand public" : "ok"} · revendeurs ${n.info.resellers != null ? Math.round(n.info.resellers * 100) + " %" : "–"}` : "…"}</td>
         <td>${n.info ? `${ok(n.g4)} méd. ${eur(n.info.price_band_prices?.median)} · dispersion ${nf(n.info.price_band_prices?.spread, 2)} · ${n.info.niche_price_total >= 960 ? "960+" : nf(n.info.niche_price_total)} ann.` : "…"}</td>
-        <td><b style="color:${n.verdict === "GO" ? "var(--ok)" : n.verdict ? "var(--err)" : "var(--muted)"}">${n.verdict || "…"}</b>${n.why ? `<div class="small muted">${esc(n.why)}</div>` : ""}</td>
         <td>${n.url ? `<a href="${esc(n.url)}" target="_blank" rel="noopener">voir</a>` : ""}</td></tr>`).join("")}
       </tbody></table></div></div>` : ""}
     ${EVAN.cands.length ? `<div class="card"><h2>Étape 1 — Demande : ${EVAN.cands.length} articles (&gt; ${f.fav} favoris, &lt; ${f.days} j)</h2><div id="ecands"></div></div>` : ""}`;
@@ -265,7 +269,8 @@ async function viewEvan(token) {
     const num = id => $(id).value === "" ? null : Number($(id).value);
     const cfg = {cats: Object.fromEntries(picker.get()), pf: num("#epf"), pt: num("#ept"), st: st.get(), demo: $("#edemo").checked,
       fav: num("#e_fav") ?? 20, days: num("#e_days") ?? 7, pages: Math.min(10, num("#e_pages") ?? 5), brandMin: num("#e_bm") ?? 500, nicheMin: num("#e_nm") ?? 500,
-      flow2: num("#e_f2") ?? 250, spread: num("#e_sp") ?? 0.5, resellers: num("#e_rs") ?? 0.35, maxBrands: num("#e_mb") ?? 12, ultra: $("#e_ultra").value};
+      flow2: num("#e_f2") ?? 250, spread: num("#e_sp") ?? 0.5, resellers: num("#e_rs") ?? 0.35, maxBrands: num("#e_mb") ?? 12, ultra: $("#e_ultra").value,
+      mainstream: num("#e_main") ?? 1000000};
     if (!picker.get().size) { alert("Choisis au moins une catégorie (Evan : « choisir une catégorie »)."); return; }
     try { localStorage.setItem("vnw-evan", JSON.stringify(cfg)); } catch {}
     XP.demo = cfg.demo;
@@ -299,13 +304,15 @@ async function viewEvan(token) {
       if (info.status !== "ok" || info.error) { n.verdict = "?"; n.why = info.error || info.message || "mesure impossible"; draw(); continue; }
       n.info = info;
       n.ultra = info.ultra_competitive || ultra.includes(norm(info.brand_title || n.brand));
+      // Evan : « les marques connues ne sont PAS des niches » -> au-delà d'un volume d'annonces, marque grand public.
+      n.mainstream = cfg.mainstream && (info.brand_items || 0) > cfg.mainstream;
       n.g2 = (info.brand_items || 0) > cfg.brandMin && (info.niche_total || 0) > cfg.nicheMin;
-      n.g3 = !n.ultra && (info.resellers == null || info.resellers <= cfg.resellers);
+      n.g3 = !n.ultra && !n.mainstream && (info.resellers == null || info.resellers <= cfg.resellers);
       const sp = info.price_band_prices?.spread;
       n.g4 = sp != null && sp <= cfg.spread && (info.niche_price_total || 0) > cfg.flow2;
       const why = [];
       if (!n.g2) why.push((info.brand_items || 0) <= cfg.brandMin ? "marque trop rare" : "trop peu d'annonces dans la niche");
-      if (!n.g3) why.push(n.ultra ? "marque ultra concurrentielle" : "beaucoup de revendeurs");
+      if (!n.g3) why.push(n.ultra ? "marque ultra concurrentielle" : n.mainstream ? "marque grand public (pas une niche)" : "beaucoup de revendeurs");
       if (!n.g4) why.push(sp == null || sp > cfg.spread ? "prix incohérents (cibler un modèle / A-B test prix)" : "flow rate 2 insuffisant");
       n.verdict = why.length ? "NO-GO" : "GO"; n.why = why.join(" · ");
       const q = new URLSearchParams(); q.append("catalog[]", n.cid); q.append("brand_ids[]", info.brand_id);
@@ -315,7 +322,8 @@ async function viewEvan(token) {
       await sleep(XP.demo ? 50 : 1200 + Math.random() * 800);
     }
     EVAN.niches.sort((a, b) => (b.verdict === "GO") - (a.verdict === "GO") || b.cands - a.cands);
-    EVAN.running = false; if (token === renderToken) { $("#ego").textContent = "🎯 Analyser"; draw(); }
+    EVAN.running = false; await IDB.set("evan:last", {cands: EVAN.cands, niches: EVAN.niches.map(({items, ...n}) => n)}).catch(() => {});
+    if (token === renderToken) { $("#ego").textContent = "🎯 Analyser"; draw(); }
   };
 }
 
@@ -336,7 +344,12 @@ function fav15(obs, W) {
   if (aft && aft[0] - t <= 60) return {v: aft[1], exact: true};
   const near = bef && bef[0] >= 300 ? bef : aft && aft[0] <= 2 * t ? aft : null;
   if (!near) return {v: null, exact: false};
-  return {v: Math.round(near[1] * (t / near[0]) ** 0.75), exact: false};
+  let v = near[1] * (t / near[0]) ** 0.75;          // projection « puissance 0,75 » (les favoris ralentissent)
+  if (near === bef) {                               // … bornée par le rythme récent (pente des derniers relevés)
+    const back = o.filter(x => x[0] <= bef[0] && bef[0] - x[0] >= 90 && bef[0] - x[0] <= 600).shift();
+    if (back) v = Math.min(v, bef[1] + (bef[1] - back[1]) / (bef[0] - back[0]) * (t - bef[0]));
+  }
+  return {v: Math.round(Math.max(near === bef ? bef[1] : 0, v)), exact: false};
 }
 function radarItems(d) {
   const W = d.cfg.win;
@@ -454,8 +467,8 @@ async function viewRadar(token) {
     <label>Catégories surveillées</label><div id="rcat"></div>
     <div class="fields" style="margin-top:12px">
       <div><label>Fenêtre (min)</label><input type="number" id="rwin" min="5" max="60" value="${f.win ?? 15}"></div>
-      <div><label>🔥 si favoris ≥</label><input type="number" id="rhot" min="1" value="${f.hot ?? 10}"></div>
-      <div><label>Pages par catégorie</label><input type="number" id="rpg" min="1" max="5" value="${f.pages ?? 2}"></div>
+      <div><label>🔥 si favoris ≥</label><input type="number" id="rhot" min="1" value="${f.hot ?? 20}"></div>
+      <div><label>Pages par catégorie</label><input type="number" id="rpg" min="1" max="5" value="${f.pages ?? 3}"></div>
       <div><label>Secondes entre requêtes</label><input type="number" id="rpace" min="4" value="${f.pace ?? 8}"></div>
       <div><label>Prix min (€)</label><input type="number" id="rpf" value="${f.pf ?? ""}"></div>
       <div><label>Prix max (€)</label><input type="number" id="rpt" value="${f.pt ?? ""}"></div>
@@ -474,8 +487,8 @@ async function viewRadar(token) {
   <div id="rres">${RADAR.data ? "" : `<div class="card empty">Le radar n'a pas encore tourné.</div>`}</div>`;
   const picker = catPicker($("#rcat"), new Map(Object.entries(f.cats || {}).map(([k, v]) => [+k, v])), {placeholder: "Vide = les 9 grandes catégories de Vinted"});
   const st = statusPicker($("#rst"), f.st || []);
-  const cost = () => { const n = picker.get().size || rootCats().length, pg = +$("#rpg").value || 2, pace = +$("#rpace").value || 8;
-    $("#rcost").textContent = `${n} catégorie(s) × ${pg} page(s) : chaque recherche revient toutes les ~${dur(n * pg * pace * 1.33)} (≈ ${nf(60 / pace * 1.33, 1)} requêtes/min). Pour mesurer précisément à ${+$("#rwin").value || 15} min, vise un retour en moins de 5 min : moins de catégories ou de pages.`; };
+  const cost = () => { const n = picker.get().size || rootCats().length, pg = +$("#rpg").value || 3, pace = +$("#rpace").value || 8;
+    $("#rcost").textContent = `${n} catégorie(s) × ${pg} page(s) : chaque recherche revient toutes les ~${dur(n * pg * pace * 1.33)} (≈ ${nf(60 / pace * 1.33, 1)} requêtes/min). Sur les grandes catégories, une annonce quitte les premières pages vers 5-10 min : sa valeur à ${+$("#rwin").value || 15} min est alors projetée (≈, prudente). Pour une mesure exacte d'une niche précise, utilise l'onglet Veille. Astuce : un prix min (ex. 10 €) écarte les petits articles à 2 € très « likés ».`; };
   $("#rf").addEventListener("input", cost); setTimeout(cost, 300);
   $("#ralerts").onclick = async () => { await ALERTS.toggle({session: {id: "radar"}, alerts: []}); viewRadar(token); };
   if ($("#rreset")) $("#rreset").onclick = async () => { if (!confirm("Effacer le radar en cours et en démarrer un nouveau ?")) return; RADAR.data = null; await IDB.del("radar:current"); viewRadar(token); };
@@ -485,7 +498,7 @@ async function viewRadar(token) {
     e.preventDefault();
     if (RADAR.running) { RADAR.stop = true; $("#rgo").textContent = "Arrêt…"; return; }
     const num = id => $(id).value === "" ? null : Number($(id).value);
-    const cfg = {cats: Object.fromEntries(picker.get()), win: num("#rwin") ?? 15, hot: num("#rhot") ?? 10, pages: Math.min(5, num("#rpg") ?? 2),
+    const cfg = {cats: Object.fromEntries(picker.get()), win: num("#rwin") ?? 15, hot: num("#rhot") ?? 20, pages: Math.min(5, num("#rpg") ?? 3),
       pace: Math.max(4, num("#rpace") ?? 8), pf: num("#rpf"), pt: num("#rpt"), hours: num("#rh"), st: st.get(), demo: $("#rdemo").checked};
     try { localStorage.setItem("vnw-radar", JSON.stringify(cfg)); } catch {}
     if (!RADAR.data || JSON.stringify(RADAR.data.cfg.cats) !== JSON.stringify(cfg.cats)) RADAR.data = radarNew(cfg); else RADAR.data.cfg = cfg;

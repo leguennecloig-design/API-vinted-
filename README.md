@@ -19,6 +19,21 @@ La fenêtre de `start.bat` affiche une adresse du type `http://192.168.1.23:8000
 téléphone connecté **au même Wi-Fi**. Si ça ne charge pas, autorise Python quand le pare-feu Windows
 le demande (réseau **privé**), ou relance `start.bat` après avoir accepté.
 
+## Les modes
+
+| Onglet | À quoi ça sert |
+|---|---|
+| **Veille** | Suivre toutes les nouvelles annonces d'une ou plusieurs catégories pendant X min et mesurer leurs favoris à 5/10/15 min (le plus précis). |
+| **📡 Radar** | Veille **continue sur toutes les catégories** (heures, jours) : le tri « pertinence » de Vinted fait remonter les annonces récentes qui plaisent ; le radar repère celles de moins de 15 min, mesure leurs favoris à 15 min et construit le **classement des marques** (🔥, favoris médians, fav/min, offre vue, ratio demande/offre). Alertes possibles. |
+| **🔎 Recherche** | Recherche instantanée, ex. **≥ 40 favoris postées il y a 1 à 2 jours**, sur une ou plusieurs catégories (jusqu'à 10 pages, tranches de prix pour élargir). |
+| **🎯 Méthode Evan** | Les 4 filtres d'Evan Martin automatisés : **Demande** (pertinence, > 20 favoris, < 7 jours, pages 1-5) → **Flow rate** (marque > 500 annonces, marque × catégorie > 500) → **Concurrence** (marques ultra concurrentielles ou grand public, part de revendeurs) → **Win rate** (prix cohérents, > 250 annonces dans la tranche). Verdict GO / NO-GO motivé + lien Vinted pour la vérification visuelle (fonds gris, grossistes). Seuils modifiables. |
+
+**Âge des annonces sur plusieurs jours** : Vinted ne donne plus aucune date. L'app utilise une « horloge des
+IDs » : elle note (heure, plus haut numéro d'annonce) à chaque recherche et convertit un numéro en date. Sur la
+période où l'app a déjà tourné, c'est précis à ±1 min ; au-delà, c'est extrapolé (±15-20 %). Plus tu
+l'utilises, plus c'est précis. **« Revendeurs »** est calculé à la volée (part des annonces détenues par des
+vendeurs qui en ont plusieurs dans la page) : aucune donnée vendeur n'est conservée.
+
 ## Mise en ligne sur Vercel
 
 Importe ce dépôt dans Vercel (*Add New › Project*), sans aucun réglage : ça marche directement.
