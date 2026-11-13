@@ -132,35 +132,47 @@ def _demo_brand_info(brand, catalog_id, pf, pt) -> dict:
 
 
 class DemoExplore:
-    """Résultats « par pertinence » simulés sur 7 jours (pour tester l'interface sans Vinted)."""
+    """Résultats simulés sur 7 jours, à heures de mise en ligne fixes (une même annonce peut être revue
+    plusieurs fois, comme sur Vinted) — pour tester l'interface sans appeler Vinted."""
     demo = True
     last_pagination: dict = {}
+    BUCKET = 300  # une « tranche » de 5 min, 4 annonces en moyenne
 
     def __init__(self, now: float, seed: int = 7):
         self.now, self.seed = now, seed
 
+    def _bucket(self, b: int, cat) -> list[dict]:
+        rng = random.Random(f"{self.seed}:{cat}:{b}")
+        out = []
+        for k in range(rng.randint(2, 6)):
+            brand, heat, pmean, _ = rng.choice(vinted.DEMO_BRANDS)
+            ts = b * self.BUCKET + rng.random() * self.BUCKET
+            out.append({"id": int(ts * 1000) * 100 + k, "brand": brand, "ts": ts, "q": rng.lognormvariate(0, 0.6),
+                        "heat": heat, "price": round(max(3, rng.lognormvariate(math.log(pmean), 0.4)))})
+        return out
+
+    def _favs(self, i) -> int:
+        age_h = max(0.0, (self.now - i["ts"]) / 3600)
+        return int(i["heat"] * i["q"] * (12 * (1 - math.exp(-age_h * 60 / 12)) + 30 * (1 - math.exp(-age_h / 8))))
+
     def fetch_page(self, filters: dict, page_no: int, extra=None) -> list[dict]:
         order = (extra or {}).get("order", "newest_first")
-        rng = random.Random(f"{self.seed}:{filters.get('catalog_ids')}:{int(self.now // 600)}")
-        brands = vinted.DEMO_BRANDS
-        pool = []
-        for k in range(1500):
-            age = rng.expovariate(1 / (6 * 3600)) if order == "relevance" else k * 2.0
-            if age > 7 * 86400:
-                continue
-            b, heat, pmean, _ = rng.choice(brands)
-            q = rng.lognormvariate(0, 0.7)
-            favs = int(heat * q * 25 * (1 - math.exp(-age / 3600 / 6)) + heat * q * 12 * (1 - math.exp(-age / 720)))
-            ts = self.now - age
-            iid = int(ts * 1000) * 100 + k % 100
-            pool.append({"id": iid, "title": f"{b or 'Pièce'} – article", "brand": b, "favs": favs, "ts": ts,
-                         "price": round(max(3, rng.lognormvariate(math.log(pmean), 0.4)))})
-        if order == "relevance":
-            pool.sort(key=lambda i: -(i["favs"] + 3) / ((self.now - i["ts"]) / 3600 + 2) ** 0.5)
-        self.last_pagination = {"total_entries": 960}
+        cat = (filters.get("catalog_ids") or [None])[0]
+        pf, pt = filters.get("price_from"), filters.get("price_to")
+        b_now = int(self.now // self.BUCKET)
+        horizon = 7 * 86400 // self.BUCKET if order == "relevance" else 30
+        pool = [i for b in range(b_now - horizon, b_now + 1) for i in self._bucket(b, cat)
+                if i["ts"] <= self.now and (pf is None or i["price"] >= pf) and (pt is None or i["price"] <= pt)]
+        for i in pool:
+            i["favs"] = self._favs(i)
+        if order == "relevance":  # récence + popularité, comme le tri « pertinence »
+            pool.sort(key=lambda i: -(i["favs"] + 2) / ((self.now - i["ts"]) / 3600 + 0.5) ** 1.0)
+        else:
+            pool.sort(key=lambda i: -i["ts"])
+        self.last_pagination = {"total_entries": min(960, len(pool))}
         chunk = pool[(page_no - 1) * 96: page_no * 96]
-        return [{"id": i["id"], "title": i["title"], "price": {"amount": str(i["price"]), "currency_code": "EUR"},
-                 "item_box": {"first_line": i["brand"] or i["title"], "second_line": "M · Très bon état"},
+        return [{"id": i["id"], "title": f"{i['brand'] or 'Pièce'} – article", "price": {"amount": str(i["price"]), "currency_code": "EUR"},
+                 "item_box": {"first_line": i["brand"] or "Pièce", "second_line": "M · Très bon état"},
                  "url": f"/items/{i['id']}-demo", "favourite_count": i["favs"], "view_count": 0, "promoted": False,
                  "photo": {"url": f"/demo-photo/{i['id']}.svg?b={i['brand'] or 'NA'}", "high_resolution": {}},
                  "_demo_ts": i["ts"]} for i in chunk]

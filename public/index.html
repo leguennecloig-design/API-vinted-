@@ -35,7 +35,10 @@ header{position:sticky;top:0;z-index:10;background:var(--card);border-bottom:1px
 .logo{display:flex;align-items:center;gap:10px;font-weight:700;font-size:17px;color:var(--text);white-space:nowrap}
 .logo i{width:30px;height:30px;border-radius:9px;background:var(--brand);display:grid;place-items:center;flex:none}
 .logo small{font-weight:500;color:var(--muted);font-size:12px;display:block;line-height:1}
-nav{margin-left:auto;display:flex;gap:4px;background:var(--bg);padding:4px;border-radius:12px}
+nav{margin-left:auto;display:flex;gap:4px;background:var(--bg);padding:4px;border-radius:12px;overflow-x:auto;max-width:100%;scrollbar-width:none}
+nav::-webkit-scrollbar{display:none}
+nav a{white-space:nowrap}
+@media (max-width:760px){.bar{flex-wrap:wrap}.bar nav{margin-left:0;width:100%}}
 nav a{padding:7px 14px;border-radius:9px;color:var(--muted);font-weight:600;font-size:14px}
 nav a.on{background:var(--card);color:var(--brand);box-shadow:var(--shadow)}
 nav a:hover{text-decoration:none}
@@ -173,11 +176,15 @@ td img{width:34px;height:44px;object-fit:cover;border-radius:6px;vertical-align:
       <span>Niche Watch<small>Vinted</small></span></a>
     <nav>
       <a href="#veille" id="nav-veille">Veille<span id="navdot" class="live-dot hidden"></span></a>
+      <a href="#radar" id="nav-radar">📡 Radar</a>
+      <a href="#recherche" id="nav-recherche">🔎 Recherche</a>
+      <a href="#evan" id="nav-evan">🎯 Méthode Evan</a>
       <a href="#historique" id="nav-historique">Historique</a>
     </nav>
   </div>
 </header>
 <main id="app"></main>
+<script src="/modes.js"></script>
 
 <script>
 "use strict";
@@ -641,6 +648,9 @@ async function route() {
   document.querySelectorAll("nav a").forEach(a => a.classList.remove("on"));
   if (h.startsWith("session/")) { $("#nav-historique").classList.add("on"); return viewSession(+h.split("/")[1], token); }
   if (h === "historique") { $("#nav-historique").classList.add("on"); return viewHistory(token); }
+  if (h === "radar") { $("#nav-radar").classList.add("on"); return viewRadar(token); }
+  if (h === "recherche") { $("#nav-recherche").classList.add("on"); return viewSearch(token); }
+  if (h === "evan") { $("#nav-evan").classList.add("on"); return viewEvan(token); }
   $("#nav-veille").classList.add("on");
   return viewWatch(token);
 }

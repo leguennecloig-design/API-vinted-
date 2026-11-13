@@ -137,6 +137,16 @@ def service_worker():
     return FileResponse(PUBLIC / "sw.js", media_type="application/javascript", headers={"Cache-Control": "no-cache"})
 
 
+@app.get("/modes.js")
+def modes_js():
+    return FileResponse(PUBLIC / "modes.js", media_type="application/javascript", headers={"Cache-Control": "no-cache"})
+
+
+@app.get("/categories.json")
+def categories_json():
+    return FileResponse(PUBLIC / "categories.json", media_type="application/json")
+
+
 @app.get("/favicon.svg")
 def favicon():
     return FileResponse(PUBLIC / "favicon.svg", media_type="image/svg+xml")
@@ -154,7 +164,7 @@ async def browser_mode_guard(request: Request, call_next):
     """En mode navigateur, seules les routes sans état sont disponibles."""
     p = request.url.path
     if BROWSER_MODE and p.startswith("/api/") and p not in ("/api/info", "/api/scan", "/api/parse-url", "/api/categories",
-                                                             "/api/debug/raw", "/api/explore", "/api/brand-info", "/api/idclock"):
+                                                             "/api/explore", "/api/brand-info", "/api/idclock"):
         return JSONResponse({"detail": "Mode navigateur : cette route est gérée par la page."}, status_code=400)
     return await call_next(request)
 
@@ -296,43 +306,6 @@ def brand_info(body: BrandBody):
 def idclock_points():
     from . import idclock
     return {"points": idclock.points()[-500:], "coverage_start": idclock.coverage_start()}
-
-
-class RawBody(BaseModel):
-    url: str
-    params: dict = {}
-
-
-@app.post("/api/debug/raw")
-def debug_raw(body: RawBody):
-    """TEMPORAIRE (exploration de l'API) : GET sur un hôte Vinted uniquement, réponse tronquée."""
-    if not (body.url.startswith("https://www.vinted.fr/") or body.url.startswith("https://api.vinted.fr/")):
-        raise HTTPException(400, "hôte non autorisé")
-    c = vinted.VintedClient()
-    c.warmup()
-    h = c._headers() if body.url.startswith("https://api.") else {"Accept": "application/json"}
-    r = c.session.get(body.url, params=body.params, headers=h, timeout=25)
-    import re as _re
-    grep = body.params.pop("__grep", None) if False else None
-    if body.url.endswith("#grep"):
-        pass
-    try:
-        data = r.json()
-    except Exception:
-        txt = r.text
-        pats = ["created_at", "updated_at", "last_push", "il y a", "Ajouté", "uploaded", "photo_uploaded", "timestamp",
-                "push_up", "\"date", "Date de", "Téléchargé", "Ajoutée"]
-        hits = {}
-        for p_ in pats:
-            hits[p_] = [txt[max(0, m.start() - 80): m.start() + 120] for m in _re.finditer(_re.escape(p_), txt)][:3]
-        return {"status": r.status_code, "len": len(txt), "hits": {k: v for k, v in hits.items() if v}}
-    def strip(x, depth=0):
-        if isinstance(x, dict):
-            return {k: ({"id": v.get("id")} if k in ("user", "seller") and isinstance(v, dict) else strip(v, depth + 1)) for k, v in list(x.items())[:40]}
-        if isinstance(x, list):
-            return [strip(v, depth + 1) for v in x[:4]] + ([f"... +{len(x) - 4}"] if len(x) > 4 else [])
-        return x
-    return {"status": r.status_code, "json": strip(data)}
 
 
 @app.post("/api/scan")
