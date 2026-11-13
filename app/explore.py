@@ -85,8 +85,11 @@ def _flow_per_day(items: list[dict], total: int | None, now: float) -> float | N
     ids = sorted((i["item_id"] for i in items if not i.get("promoted")), reverse=True)
     if len(ids) < 3:
         return 0.0
-    age_days = max((now - idclock.to_time(ids[-1])) / 86400, 1 / 1440)
-    return round(len(ids) / age_days, 1)
+    # Les plus anciennes de la page sont souvent des annonces « remontées » (très vieil ID) : on mesure
+    # sur les 75 % les plus récentes pour ne pas sous-estimer le flux.
+    k = max(2, int(len(ids) * 0.75))
+    age_days = max((now - idclock.to_time(ids[k - 1])) / 86400, 1 / 1440)
+    return round(k / age_days, 1)
 
 
 def brand_info(client, brand: str, catalog_id: int | None, price_from=None, price_to=None, status_ids=None) -> dict:

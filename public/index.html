@@ -582,8 +582,10 @@ const BRAND_ALIASES = {"polo ralph lauren": "ralph lauren", "lauren ralph lauren
   "zara trafaluc": "zara", "zara woman": "zara", "h m": "h&m", "h and m": "h&m", "hm": "h&m", "hugo boss": "boss", "boss orange": "boss",
   "boss black": "boss", "hugo": "boss", "g star raw": "g-star", "g star": "g-star", "cp company": "c.p. company", "c p company": "c.p. company",
   "dr martens": "dr. martens", "carhartt wip": "carhartt"};
+const NO_BRAND = new Set(["inconnu", "inconnue", "autre", "autres", "no brand", "sans marque", "unbranded", "other", "others",
+  "non renseigné", "non renseignée", "marque inconnue", "unknown", "aucune"]);
 function brandKey(name) {
-  if (!name || name === "(sans marque)") return "(sans marque)";
+  if (!name || name === "(sans marque)" || NO_BRAND.has(name.trim().toLowerCase())) return "(sans marque)";
   let k = name.normalize("NFKD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
   k = k.split(/\s+(?:x|×|&|feat\.?)\s+/)[0].replace(/[^a-z0-9.&]+/g, " ").trim();
   k = BRAND_ALIASES[k] || k;

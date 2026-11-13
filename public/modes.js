@@ -211,7 +211,8 @@ function subcatsOf(id, path, max) {   // feuilles sous une catégorie (sinon ses
 function nicheScore(n, cfg) {
   const i = n.info || {}, why = [], plus = [];
   // DEMANDE (40) : nombre d'articles très likés récents + favoris par jour
-  const D = Math.min(1, n.cands / 8) * 20 + Math.min(1, n.perDay / 25) * 20;
+  // un seul article très liké ne suffit pas : le poids des favoris/jour grandit avec le nombre d'articles
+  const D = Math.min(1, n.cands / 8) * 20 + Math.min(1, n.perDay / 25) * 20 * Math.min(1, n.cands / 3);
   if (D >= 28) plus.push("forte demande"); else if (D < 12) why.push("demande faible");
   // FLUX (25) : annonces publiées par jour dans la niche + volume dans la tranche de prix
   const flow = i.flow_per_day ?? 0, tot = i.niche_price_total ?? 0;
@@ -323,7 +324,7 @@ async function viewEvan(token) {
         const its = r.items || [];
         for (const it of its) {
           if (it.promoted || seen.has(it.item_id)) continue; seen.add(it.item_id);
-          if (it.favs > cfg.fav && it.age_min / 1440 < cfg.days && it.brand && it.brand !== "(sans marque)") EVAN.cands.push({...it, cat: cpath, cid});
+          if (it.favs > cfg.fav && it.age_min / 1440 < cfg.days && brandKey(it.brand) !== "(sans marque)") EVAN.cands.push({...it, cat: cpath, cid});
         }
         await sleep(XP.demo ? 30 : 800 + Math.random() * 600);
         if (its.length < 80) { EVAN.done += cfg.pages - p; break; }   // plus de résultats dans cette catégorie

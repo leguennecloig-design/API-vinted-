@@ -127,13 +127,15 @@ BRAND_ALIASES = {
     "g star raw": "g-star", "g star": "g-star", "stussy": "stussy", "cp company": "c.p. company", "c p company": "c.p. company",
     "dr martens": "dr. martens", "dr. martens": "dr. martens", "new balance": "new balance", "carhartt wip": "carhartt",
 }
+NO_BRAND = {"inconnu", "inconnue", "autre", "autres", "no brand", "sans marque", "unbranded", "other", "others",
+            "non renseigne", "non renseignée", "non renseignee", "marque inconnue", "unknown", "aucune"}
 _SUFFIX = _re.compile(r"(\s+(originals|original|sportswear|vintage|kids|junior|enfant|homme|femme|woman|women|men|"
                       r"collection|paris|london|italia|france|usa|official))+$")   # en fin de nom seulement
 
 
 def brand_key(name: str | None) -> str:
     """Clé de regroupement d'une marque : « Polo Ralph Lauren », « RALPH LAUREN » -> « ralph lauren »."""
-    if not name or name == "(sans marque)":
+    if not name or name == "(sans marque)" or name.strip().lower() in NO_BRAND:
         return "(sans marque)"
     k = _ud.normalize("NFKD", name).encode("ascii", "ignore").decode().lower()
     k = _re.split(r"\s+(?:x|×|&|feat\.?)\s+", k)[0]                 # collaborations : « Nike x Nocta » -> nike
