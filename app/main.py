@@ -261,7 +261,7 @@ def debug_raw(body: RawBody):
         return {"status": r.status_code, "len": len(txt), "hits": {k: v for k, v in hits.items() if v}}
     def strip(x, depth=0):
         if isinstance(x, dict):
-            return {k: ("<user>" if k in ("user", "seller") else strip(v, depth + 1)) for k, v in list(x.items())[:40]}
+            return {k: ({"id": v.get("id")} if k in ("user", "seller") and isinstance(v, dict) else strip(v, depth + 1)) for k, v in list(x.items())[:40]}
         if isinstance(x, list):
             return [strip(v, depth + 1) for v in x[:4]] + ([f"... +{len(x) - 4}"] if len(x) > 4 else [])
         return x
