@@ -213,7 +213,8 @@ def scan(body: ScanBody):
             raw = client.fetch_page(body.filters, body.debug_page, body.debug_params)
             sample = {k: v for k, v in (raw[0] if raw else {}).items() if k not in ("user", "seller")}
             return {"status": "ok", "count": len(raw), "sample": sample,
-                    "ids": [r.get("id") for r in raw], "promoted": [bool(r.get("promoted")) for r in raw]}
+                    "ids": [r.get("id") for r in raw], "promoted": [bool(r.get("promoted")) for r in raw],
+                    "favs": [r.get("favourite_count") for r in raw], "views": [r.get("view_count") for r in raw]}
         except Exception as e:
             return {"status": "error", "message": f"{type(e).__name__}: {e}"}
     try:
