@@ -153,7 +153,7 @@ def info():
 async def browser_mode_guard(request: Request, call_next):
     """En mode navigateur, seules les routes sans état sont disponibles."""
     p = request.url.path
-    if BROWSER_MODE and p.startswith("/api/") and p not in ("/api/info", "/api/scan", "/api/parse-url", "/api/categories"):
+    if BROWSER_MODE and p.startswith("/api/") and p not in ("/api/info", "/api/scan", "/api/parse-url", "/api/categories", "/api/debug/raw"):
         return JSONResponse({"detail": "Mode navigateur : cette route est gérée par la page."}, status_code=400)
     return await call_next(request)
 
