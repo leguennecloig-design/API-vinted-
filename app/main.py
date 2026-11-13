@@ -245,10 +245,20 @@ def debug_raw(body: RawBody):
     c.warmup()
     h = c._headers() if body.url.startswith("https://api.") else {"Accept": "application/json"}
     r = c.session.get(body.url, params=body.params, headers=h, timeout=25)
+    import re as _re
+    grep = body.params.pop("__grep", None) if False else None
+    if body.url.endswith("#grep"):
+        pass
     try:
         data = r.json()
     except Exception:
-        return {"status": r.status_code, "text": r.text[:1500]}
+        txt = r.text
+        pats = ["created_at", "updated_at", "last_push", "il y a", "Ajouté", "uploaded", "photo_uploaded", "timestamp",
+                "push_up", "\"date", "Date de", "Téléchargé", "Ajoutée"]
+        hits = {}
+        for p_ in pats:
+            hits[p_] = [txt[max(0, m.start() - 80): m.start() + 120] for m in _re.finditer(_re.escape(p_), txt)][:3]
+        return {"status": r.status_code, "len": len(txt), "hits": {k: v for k, v in hits.items() if v}}
     def strip(x, depth=0):
         if isinstance(x, dict):
             return {k: ("<user>" if k in ("user", "seller") else strip(v, depth + 1)) for k, v in list(x.items())[:40]}
