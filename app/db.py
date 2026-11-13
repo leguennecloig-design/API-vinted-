@@ -11,6 +11,8 @@ import statistics
 import threading
 from pathlib import Path
 
+from . import measure
+
 DB_URL = os.environ.get("DATABASE_URL") or os.environ.get("POSTGRES_URL") or ""
 SQLITE_PATH = Path(__file__).resolve().parent.parent / "data" / "niche_watch.db"
 
@@ -49,7 +51,7 @@ SESSION_COLS = """
 """
 ITEM_COLS = ["session_id", "item_id", "title", "brand", "price", "currency", "size", "condition", "url",
              "photo_url", "posted_at", "first_seen", "first_age", "last_age", "last_fav", "last_views",
-             "window_fav", "window_age"]
+             "window_fav", "window_age", "cps"]
 
 
 def _schema(pg: bool) -> list[str]:
@@ -63,7 +65,7 @@ def _schema(pg: bool) -> list[str]:
             price {real}, currency TEXT, size TEXT, condition TEXT, url TEXT, photo_url TEXT,
             posted_at {real} NOT NULL, first_seen {real} NOT NULL, first_age {real} NOT NULL,
             last_age {real}, last_fav INTEGER, last_views INTEGER, window_fav INTEGER, window_age {real},
-            PRIMARY KEY (session_id, item_id))""",
+            cps TEXT, PRIMARY KEY (session_id, item_id))""",
         f"""CREATE TABLE IF NOT EXISTS snapshots (
             session_id {big} NOT NULL, item_id {big} NOT NULL, ts {real} NOT NULL,
             age_s {real} NOT NULL, favs INTEGER NOT NULL, views INTEGER)""",
@@ -81,12 +83,13 @@ class DB:
                 self.execute(stmt)
             # Migration des bases créées avant la nouvelle API Vinted (sept. 2026).
             big = "BIGINT" if self.pg else "INTEGER"
-            for col, typ in (("id_floor", big), ("max_seen_id", big), ("calib", "TEXT")):
+            for table, col, typ in (("sessions", "id_floor", big), ("sessions", "max_seen_id", big),
+                                    ("sessions", "calib", "TEXT"), ("items", "cps", "TEXT")):
                 try:
                     if self.pg:
-                        self.execute(f"ALTER TABLE sessions ADD COLUMN IF NOT EXISTS {col} {typ}")
+                        self.execute(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {col} {typ}")
                     else:
-                        self.execute(f"ALTER TABLE sessions ADD COLUMN {col} {typ}")
+                        self.execute(f"ALTER TABLE {table} ADD COLUMN {col} {typ}")
                 except Exception:
                     pass
 
@@ -186,17 +189,20 @@ class DB:
 
     # ------------------------------------------------------------------ annonces
     def items(self, sid: int) -> list[dict]:
-        return self.all("SELECT * FROM items WHERE session_id=?", (sid,))
+        rows = self.all("SELECT * FROM items WHERE session_id=?", (sid,))
+        for r in rows:
+            r["cps"] = json.loads(r["cps"]) if r.get("cps") else {}
+        return rows
 
     def snapshot_count(self, sid: int) -> int:
         return self.one("SELECT COUNT(*) AS n FROM snapshots WHERE session_id=?", (sid,))["n"]
 
     def upsert_items(self, rows: list[dict]):
         upd = ",".join(f"{c}=excluded.{c}" for c in
-                       ("last_age", "last_fav", "last_views", "window_fav", "window_age"))
+                       ("last_age", "last_fav", "last_views", "window_fav", "window_age", "cps"))
         for chunk in _chunks(rows, 400):
             ph = ",".join("(" + ",".join("?" for _ in ITEM_COLS) + ")" for _ in chunk)
-            params = [r.get(c) for r in chunk for c in ITEM_COLS]
+            params = [json.dumps(r.get(c) or {}) if c == "cps" else r.get(c) for r in chunk for c in ITEM_COLS]
             self.execute(f"INSERT INTO items ({','.join(ITEM_COLS)}) VALUES {ph} "
                          f"ON CONFLICT (session_id, item_id) DO UPDATE SET {upd}", params)
 
@@ -230,51 +236,10 @@ def _session_dict(r: dict) -> dict:
 
 # ---------------------------------------------------------------------- calculs
 def enrich_items(items: list[dict], window_min: int, threshold: int, now: float | None = None) -> list[dict]:
-    """Ajoute à chaque annonce : favoris fenêtre, statut partiel / en cours, hit."""
-    w = window_min * 60
+    """Voir app/measure.py : paliers, en cours / partielle / disparue, hit, projection, « en chauffe »."""
     for it in items:
-        wf = it.get("window_fav")
-        wa = it.get("window_age")
-        it["measured"] = wf is not None
-        it["in_progress"] = bool(now is not None and (now - it["posted_at"]) < w and wf is not None)
-        # Mesure partielle : le relevé retenu a été pris trop tôt (plus de 30 s avant la fin de la
-        # fenêtre), par ex. veille arrêtée ou pause anti-blocage. 30 s de tolérance pour l'aléa des scans.
-        early = bool(wf is not None and wa is not None and wa < w - 30 and not it["in_progress"])
-        # Annonce plus jamais revue après ce relevé, alors que les scans continuaient : elle a disparu
-        # des résultats (vendue, réservée ou retirée) avant la fin de sa fenêtre. Signal de forte demande.
-        la = it.get("last_age")
-        ended = now is None or now - it["posted_at"] > w + 180
-        it["gone"] = bool(early and ended and la is not None and la < w - 30)
-        it["partial"] = early and not it["gone"]
-        it["is_hit"] = bool(wf is not None and wf >= threshold)
-        it["age_min"] = round((now - it["posted_at"]) / 60, 1) if now else None
-        it["favs_per_min"] = round(wf / max(wa / 60, 1), 2) if wf is not None and wa else None
+        measure.enrich(it, window_min, threshold, now)
     return items
 
 
-def brand_stats(items: list[dict]) -> list[dict]:
-    groups: dict[str, list[dict]] = {}
-    for it in items:
-        groups.setdefault(it.get("brand") or "(sans marque)", []).append(it)
-    out = []
-    for brand, its in groups.items():
-        favs = [i["window_fav"] for i in its if i["window_fav"] is not None]
-        prices = [i["price"] for i in its if i.get("price") is not None]
-        hits = sum(1 for i in its if i["is_hit"])
-        gone = sum(1 for i in its if i.get("gone"))
-        n = len(its)
-        med = statistics.median(favs) if favs else 0
-        out.append({
-            "brand": brand,
-            "n_items": n,
-            "hits": hits,
-            "hit_rate": round(100 * hits / n, 1) if n else 0,
-            "fav_mean": round(statistics.fmean(favs), 1) if favs else 0,
-            "fav_median": med,
-            "fav_max": max(favs) if favs else 0,
-            "price_mean": round(statistics.fmean(prices), 2) if prices else None,
-            "gone": gone,
-            "score": round(med * min(n, 5) / 5 + 2 * hits, 2),
-        })
-    out.sort(key=lambda b: (b["score"], b["hits"], b["n_items"]), reverse=True)
-    return out
+brand_stats = measure.brand_stats

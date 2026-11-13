@@ -11,6 +11,7 @@ import random
 import time
 
 from . import vinted
+from . import measure
 from .db import DB, brand_stats, enrich_items
 
 log = logging.getLogger("tracker")
@@ -66,9 +67,7 @@ def stop(db: DB, sid: int | None = None):
 
 def finish(db: DB, s: dict, status: str):
     items = enrich_items(db.items(s["id"]), s["window_min"], s["hit_threshold"])
-    brands = brand_stats(items)
-    summary = {"n_hits": sum(1 for i in items if i["is_hit"]),
-               "top_brands": [{"brand": b["brand"], "score": b["score"], "hits": b["hits"]} for b in brands[:3]]}
+    summary = measure.session_summary(items, s)
     text = {"done": "Veille terminée", "stopped": "Veille arrêtée", "error": "Veille arrêtée sur erreur",
             "interrupted": "Veille interrompue (plus aucun scan)"}[status]
     db.update_session(s["id"], status=status, ended_at=time.time(), api_level="idle", api_text=text,
@@ -223,13 +222,14 @@ def scan_pages(client, filters: dict, active_ids: set[int], max_seen: int | None
 
 
 def schedule_next(now: float, nxt: float, items, window_s: float) -> float:
-    """Avance le prochain scan si une annonce risque de « sauter » son créneau de mesure.
+    """Avance le prochain scan pour qu'aucun palier (5, 10, 15 min…) ne tombe trop loin d'un relevé.
 
-    Le relevé retenu doit tomber entre W et W + 60 s d'âge. Si ce créneau tombe entièrement entre
-    maintenant et `nxt`, on vise son milieu (W + 30 s), sans jamais descendre sous 45 s d'intervalle.
+    Pour chaque palier c d'une annonce : si l'instant c + 60 s tombe avant le prochain scan prévu, on
+    vise c + 30 s, sans jamais descendre sous 45 s d'intervalle (anti-blocage).
     """
-    targets = [i["posted_at"] + window_s + 30 for i in items
-               if now < i["posted_at"] + window_s + 60 < nxt]
+    cps = measure.checkpoints(int(round(window_s / 60)))
+    targets = [i["posted_at"] + c * 60 + 30 for i in items for c in cps
+               if now < i["posted_at"] + c * 60 + 60 < nxt]
     if targets:
         return min(nxt, max(now + MIN_INTERVAL, min(targets)))
     return nxt
@@ -237,7 +237,7 @@ def schedule_next(now: float, nxt: float, items, window_s: float) -> float:
 
 def active_ids(items, now: float, window_s: float) -> set[int]:
     """Annonces dont la mesure n'est pas finie (âge <= fenêtre + 2 min) : à revoir à chaque scan."""
-    return {i["item_id"] for i in items if now - i["posted_at"] <= window_s + 120}
+    return {i["item_id"] for i in items if now - i["posted_at"] <= window_s + 150}
 
 
 def estimate_posted(item_id: int, calib: list) -> float | None:
@@ -279,15 +279,16 @@ def classify(seen: list[dict], rows: dict, s: dict, calib: list) -> int:
             row = {c: it.get(c) for c in ("title", "brand", "price", "currency", "size",
                                             "condition", "url", "photo_url")}
             row.update(session_id=s["id"], item_id=iid, posted_at=posted, first_seen=now,
-                       first_age=now - posted, window_fav=None, window_age=None)
+                       first_age=now - posted, window_fav=None, window_age=None, cps={})
             new += 1
         else:
-            row = dict(row)
+            row = dict(row, cps=dict(row.get("cps") or {}))
         age = now - row["posted_at"]
-        row.update(last_age=age, last_fav=it["favs"], last_views=it["views"])
-        # Favoris fenêtre = dernier relevé d'âge <= fenêtre + 60 s.
-        if age <= W + 60 and (row["window_age"] is None or age >= row["window_age"]):
-            row.update(window_fav=it["favs"], window_age=age)
+        if age <= W + measure.MAX_GAP:  # les relevés au-delà ne servent plus à la mesure
+            row.update(last_age=age, last_fav=it["favs"], last_views=it["views"])
+            # Paliers 5 / 10 / 15 min… : favoris interpolés entre les relevés qui les encadrent.
+            measure.update_cps(row["cps"], age, it["favs"], s["window_min"])
+            row["window_fav"], row["window_age"] = measure.window_from_cps(row["cps"], s["window_min"])
         it["age"] = age
         rows[iid] = row
     return new
@@ -371,8 +372,7 @@ def state(db: DB) -> dict:
     now = clock_now(s) if running else None
     items = enrich_items(db.items(s["id"]), s["window_min"], s["hit_threshold"], now)
     brands = brand_stats(items)
-    top = sorted(items, key=lambda i: (i["window_fav"] if i["window_fav"] is not None else -1,
-                                        i["favs_per_min"] or 0), reverse=True)[:10]
+    top = sorted(items, key=lambda i: (i["rank_value"] or 0, i["favs_per_min"] or 0), reverse=True)[:10]
     t = now if now is not None else s["final_end"]
     if t < s["capture_end"]:
         phase = "capture"
@@ -400,6 +400,12 @@ def state(db: DB) -> dict:
         "last_cycle": s["last_cycle"],
         "n_items": len(items),
         "n_hits": sum(1 for i in items if i["is_hit"]),
+        "n_hot": sum(1 for i in items if i["hot"]),
+        "n_gone": sum(1 for i in items if i["gone"]),
+        "checkpoints": measure.checkpoints(s["window_min"]),
+        "alerts": [{"item_id": i["item_id"], "kind": "hit" if i["is_hit"] else "hot", "brand": i["brand"],
+                    "price": i["price"], "favs": i["last_fav"], "age_min": i["age_min"], "url": i["url"],
+                    "projected": i["projected"]} for i in items if (i["is_hit"] or i["hot"]) and i["in_progress"]],
         "top_items": top,
         "top_brands": brands[:10],
     }

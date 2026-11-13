@@ -88,7 +88,8 @@ input:focus{outline:2px solid color-mix(in srgb,var(--brand) 45%,transparent);bo
 .legend span::before{content:"";display:inline-block;width:9px;height:9px;border-radius:3px;background:var(--brand);margin-right:5px}
 .legend span.w::before{background:var(--hit-line)}
 .stats{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-top:18px}
-@media (max-width:700px){.stats{grid-template-columns:1fr 1fr}}
+.stats.five{grid-template-columns:repeat(5,1fr)}
+@media (max-width:700px){.stats,.stats.five{grid-template-columns:1fr 1fr}}
 .stat{background:var(--bg);border-radius:12px;padding:12px 14px;min-width:0}
 .stat .v{font-size:24px;font-weight:700;line-height:1.2;font-variant-numeric:tabular-nums}
 .stat .l{font-size:12px;color:var(--muted);font-weight:600}
@@ -129,11 +130,15 @@ td img{width:34px;height:44px;object-fit:cover;border-radius:6px;vertical-align:
 .tag{font-size:11px;font-weight:700;border-radius:6px;padding:2px 6px}
 .tag.hit{background:var(--hit-line);color:#fff}
 .tag.p{background:var(--bg);color:var(--muted)}
+.tag.hot{background:color-mix(in srgb,var(--err) 16%,transparent);color:var(--err)}
+.it.hot{border-color:var(--err)}
 /* historique */
 .hist{display:grid;gap:12px}
 .h{display:grid;grid-template-columns:1fr auto;gap:10px;align-items:center}
 .h .top{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
 .h .meta{font-size:13px;color:var(--muted);margin-top:4px}
+.demand{display:flex;flex-wrap:wrap;gap:6px 14px;font-size:13px;color:var(--muted);margin-top:6px}
+.demand b{color:var(--text);font-size:15px}
 .st{font-size:11px;font-weight:700;border-radius:6px;padding:2px 7px;text-transform:uppercase;letter-spacing:.03em}
 .st.done{background:var(--brand-soft);color:var(--brand-strong)}
 .st.running{background:color-mix(in srgb,var(--ok) 18%,transparent);color:var(--ok)}
@@ -236,9 +241,7 @@ const L = {
   meta(rec) {
     const s = rec.s, items = Object.values(rec.items);
     const en = enrich(items.map(i => ({...i})), s.window_min, s.hit_threshold);
-    const brands = brandStats(en);
-    return {...s, n_items: items.length, n_hits: en.filter(i => i.is_hit).length,
-            top_brands: brands.slice(0, 3).map(b => ({brand: b.brand, score: b.score, hits: b.hits}))};
+    return {...s, calib: undefined, n_items: items.length, ...sessionSummary(en, s)};
   },
   async running() {
     const idx = await this.index(), m = idx.find(x => x.status === "running");
@@ -302,7 +305,7 @@ const L = {
     try {
       const baseline = s.id_floor == null, now0 = this.clockNow(s), W0 = s.window_min * 60;
       // Annonces dont la mesure n'est pas finie : le serveur pagine jusqu'à les avoir toutes revues.
-      const active = baseline ? [] : Object.values(rec.items).filter(i => now0 - i.posted_at <= W0 + 120).map(i => i.item_id);
+      const active = baseline ? [] : Object.values(rec.items).filter(i => now0 - i.posted_at <= W0 + 150).map(i => i.item_id);
       const body = {filters: s.filters, active_ids: active, max_seen: s.max_seen_id, baseline, cookies: rec.cookies,
                     demo: s.demo ? {seed: s.seed, now: now0, speed: s.speed, request_no: s.requests} : null};
       let r;
@@ -335,12 +338,16 @@ const L = {
             if (!(S.start_ts <= posted && posted <= S.capture_end)) continue;   // captation uniquement
             row = {session_id: S.id, item_id: it.item_id, title: it.title, brand: it.brand, price: it.price, currency: it.currency,
                    size: it.size, condition: it.condition, url: it.url, photo_url: it.photo_url, posted_at: posted,
-                   first_seen: it.seen_at, first_age: it.seen_at - posted, window_fav: null, window_age: null};
+                   first_seen: it.seen_at, first_age: it.seen_at - posted, window_fav: null, window_age: null, cps: {}};
             nNew++;
           }
           const age = it.seen_at - row.posted_at;
-          row.last_age = age; row.last_fav = it.favs; row.last_views = it.views;
-          if (age <= W + 60 && (row.window_age == null || age >= row.window_age)) { row.window_fav = it.favs; row.window_age = age; }
+          if (age <= W + M.MAX_GAP) {   // au-delà, les relevés ne servent plus à la mesure
+            row.last_age = age; row.last_fav = it.favs; row.last_views = it.views;
+            // Paliers 5 / 10 / 15 min… : favoris interpolés entre les relevés qui les encadrent.
+            row.cps = M.updateCps(row.cps || {}, age, it.favs, S.window_min);
+            [row.window_fav, row.window_age] = M.windowFromCps(row.cps, S.window_min);
+          }
           rec.items[it.item_id] = row; rec.snaps = (rec.snaps || 0) + 1;
         }
         if (ids.length) S.max_seen_id = Math.max(S.max_seen_id || 0, ...ids);
@@ -356,8 +363,9 @@ const L = {
         S.cycles += 1; S.last_cycle_at = now; S.backoff_i = 0; S.api_level = "ok";
         S.api_text = baseline ? "OK — référence prise, la captation commence" : "OK";
         let nxt = now + (baseline ? 20 : S.interval_s + Math.random() * 6);
-        // Si le créneau de mesure d'une annonce (W à W+60 s) tombe entre deux scans, on vise son milieu.
-        const targets = Object.values(rec.items).map(i => i.posted_at + W + 60).filter(e => now < e && e < nxt).map(e => e - 30);
+        // Aucun palier (5, 10, 15 min…) ne doit tomber trop loin d'un relevé : on avance le scan si besoin.
+        const cpl = M.checkpoints(S.window_min), targets = [];
+        for (const i of Object.values(rec.items)) for (const c of cpl) { const e = i.posted_at + c * 60 + 60; if (now < e && e < nxt) targets.push(e - 30); }
         if (targets.length) nxt = Math.min(nxt, Math.max(now + 45, Math.min(...targets)));
         S.next_tick_at = Math.min(nxt, S.final_end + 1);
       } else if (r.status === "stale") {
@@ -384,7 +392,7 @@ const L = {
     const s = rec.s, now = running ? this.clockNow(s) : null;
     const items = enrich(Object.values(rec.items).map(i => ({...i})), s.window_min, s.hit_threshold, now);
     const brands = brandStats(items);
-    const top = [...items].sort((a, b) => ((b.window_fav ?? -1) - (a.window_fav ?? -1)) || ((b.favs_per_min || 0) - (a.favs_per_min || 0))).slice(0, 10);
+    const top = [...items].sort((a, b) => ((b.rank_value || 0) - (a.rank_value || 0)) || ((b.favs_per_min || 0) - (a.favs_per_min || 0))).slice(0, 10);
     const t = now ?? s.final_end;
     let phase, pp;
     if (t < s.capture_end) { phase = "capture"; pp = (t - s.start_ts) / (s.capture_end - s.start_ts); }
@@ -396,6 +404,9 @@ const L = {
       next_cycle_in: running && s.next_tick_at ? Math.max(0, s.next_tick_at - t) : null,
       stalled: running && now - (s.next_tick_at || now) > 90, api: {level: s.api_level, text: s.api_text},
       warnings: s.warnings, last_cycle: s.last_cycle, n_items: items.length, n_hits: items.filter(i => i.is_hit).length,
+      n_hot: items.filter(i => i.hot).length, n_gone: items.filter(i => i.gone).length, checkpoints: M.checkpoints(s.window_min),
+      alerts: items.filter(i => (i.is_hit || i.hot) && i.in_progress).map(i => ({item_id: i.item_id, kind: i.is_hit ? "hit" : "hot",
+        brand: i.brand, price: i.price, favs: i.last_fav, age_min: i.age_min, url: i.url, projected: i.projected})),
       top_items: top, top_brands: brands.slice(0, 10)};
   },
   async sessions() { return [...await this.index()].sort((a, b) => b.created_at - a.created_at); },
@@ -404,7 +415,7 @@ const L = {
     if (!rec) throw new Error("Session introuvable");
     const s = rec.s, live = s.status === "running", now = live ? this.clockNow(s) : null;
     const items = enrich(Object.values(rec.items).map(i => ({...i})), s.window_min, s.hit_threshold, now);
-    items.sort((a, b) => (b.window_fav ?? -1) - (a.window_fav ?? -1));
+    items.sort((a, b) => (b.rank_value || 0) - (a.rank_value || 0));
     return {session: {...s, n_snapshots: rec.snaps || 0}, items, brands: brandStats(items), live};
   },
   async del(id) {
@@ -415,23 +426,63 @@ const L = {
   },
 };
 
-/* --- calculs (identiques à app/db.py) --- */
-function enrich(items, windowMin, threshold, now = null) {
-  const w = windowMin * 60;
-  for (const it of items) {
-    const wf = it.window_fav, wa = it.window_age;
+/* --- mesure de la demande : port exact de app/measure.py --- */
+const M = {
+  STD: [5, 10, 15], TOL_BEFORE: 30, TOL_AFTER: 60, MAX_GAP: 300, HOT_MIN_AGE: 120, HOT_EXPONENT: 0.75, GONE_WEIGHT: 3, HIT_WEIGHT: 2,
+  checkpoints(w) { return [...new Set([...this.STD.filter(c => c < w), +w])].sort((a, b) => a - b); },
+  updateCps(cps, age, favs, w) {
+    for (const c of this.checkpoints(w)) {
+      const t = c * 60, e = [...(cps[c] || [null, null, null, null])];
+      if (age <= t) { if (e[0] == null || age >= e[0]) { e[0] = age; e[1] = favs; } }
+      else if (e[2] == null || age < e[2]) { e[2] = age; e[3] = favs; }
+      cps[c] = e;
+    }
+    return cps;
+  },
+  cpValue(e, c) {   // [favoris au palier, mesure complète ?]
+    if (!e) return [null, false];
+    const t = c * 60, [ab, fb, aa, fa] = e;
+    if (ab != null && aa != null && aa - ab <= this.MAX_GAP) return [fb + (fa - fb) * (t - ab) / Math.max(1e-9, aa - ab), true];
+    if (ab != null && t - ab <= this.TOL_BEFORE) return [fb, true];
+    if (aa != null && aa - t <= this.TOL_AFTER) return [fa, true];
+    if (ab != null) return [fb, false];
+    return [null, false];
+  },
+  windowFromCps(cps, w) {
+    const e = cps[w], [v, complete] = this.cpValue(e, w);
+    if (v == null) return [null, null];
+    return [Math.round(v), complete ? w * 60 : e[0]];
+  },
+  enrich(it, windowMin, threshold, now) {
+    const w = windowMin * 60, wf = it.window_fav, wa = it.window_age, ageNow = now != null ? now - it.posted_at : null;
     it.measured = wf != null;
-    it.in_progress = now != null && (now - it.posted_at) < w && wf != null;
-    const early = wf != null && wa != null && wa < w - 30 && !it.in_progress;
-    // Plus jamais revue alors que les scans continuaient : vendue/réservée/retirée avant la fin de sa fenêtre.
-    it.gone = early && (now == null || now - it.posted_at > w + 180) && it.last_age != null && it.last_age < w - 30;
+    it.in_progress = ageNow != null && ageNow < w + this.TOL_AFTER && (wa == null || wa < w - this.TOL_BEFORE);
+    const early = wf != null && wa != null && wa < w - this.TOL_BEFORE && !it.in_progress;
+    // Plus jamais revue alors que les scans continuaient : vendue / réservée / retirée avant la fin de sa fenêtre.
+    const ended = now == null || ageNow > w + 180;
+    it.gone = early && ended && it.last_age != null && it.last_age < w - this.TOL_BEFORE;
     it.partial = early && !it.gone;
-    it.is_hit = wf != null && wf >= threshold;
-    it.age_min = now ? Math.round((now - it.posted_at) / 6) / 10 : null;
-    it.favs_per_min = wf != null && wa ? Math.round(wf / Math.max(wa / 60, 1) * 100) / 100 : null;
-  }
-  return items;
-}
+    const cur = it.in_progress ? it.last_fav : wf;
+    it.is_hit = cur != null && cur >= threshold;
+    it.age_min = ageNow != null ? Math.round(ageNow / 6) / 10 : null;
+    it.cp_values = {};
+    for (const c of this.checkpoints(windowMin)) {
+      const [v, complete] = this.cpValue((it.cps || {})[c], c);
+      it.cp_values[c] = v == null || (!complete && !it.gone && !it.partial) ? null : Math.round(v);
+    }
+    const lf = it.last_fav, la = it.last_age;
+    const [rf, ra] = !it.in_progress && wf != null ? [wf, wa] : [lf, la];
+    it.favs_per_min = rf != null && ra ? Math.round(rf / Math.max(ra / 60, 1) * 100) / 100 : null;
+    it.projected = null; it.hot = false;
+    if (it.in_progress && lf != null && la && la >= this.HOT_MIN_AGE) {
+      it.projected = la < w ? Math.round(lf * (w / la) ** this.HOT_EXPONENT) : lf;
+      it.hot = it.projected >= threshold && lf >= Math.max(3, threshold * 0.25) && !it.is_hit;
+    }
+    it.rank_value = it.in_progress ? Math.max(lf || 0, it.projected || 0) : (wf != null ? wf : (lf || 0));
+    return it;
+  },
+};
+function enrich(items, windowMin, threshold, now = null) { for (const it of items) M.enrich(it, windowMin, threshold, now); return items; }
 const median = a => { if (!a.length) return 0; const s = [...a].sort((x, y) => x - y), m = s.length >> 1; return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2; };
 const mean = a => a.reduce((x, y) => x + y, 0) / a.length;
 const r1 = (x, d) => Math.round(x * 10 ** d) / 10 ** d;
@@ -441,11 +492,19 @@ function brandStats(items) {
   const out = Object.entries(g).map(([brand, its]) => {
     const favs = its.filter(i => i.window_fav != null).map(i => i.window_fav), prices = its.filter(i => i.price != null).map(i => i.price);
     const hits = its.filter(i => i.is_hit).length, n = its.length, med = median(favs), gone = its.filter(i => i.gone).length;
-    return {brand, n_items: n, hits, hit_rate: n ? r1(100 * hits / n, 1) : 0, fav_mean: favs.length ? r1(mean(favs), 1) : 0,
-      fav_median: med, fav_max: favs.length ? Math.max(...favs) : 0, price_mean: prices.length ? r1(mean(prices), 2) : null,
-      score: r1(med * Math.min(n, 5) / 5 + 2 * hits, 2), gone};
+    return {brand, n_items: n, hits, hot: its.filter(i => i.hot).length, gone, hit_rate: n ? r1(100 * hits / n, 1) : 0,
+      fav_mean: favs.length ? r1(mean(favs), 1) : 0, fav_median: med, fav_max: favs.length ? Math.max(...favs) : 0,
+      price_mean: prices.length ? r1(mean(prices), 2) : null, score: r1(med * Math.min(n, 5) / 5 + M.HIT_WEIGHT * hits + M.GONE_WEIGHT * gone, 2)};
   });
   return out.sort((a, b) => (b.score - a.score) || (b.hits - a.hits) || (b.n_items - a.n_items));
+}
+function sessionSummary(items, s) {   // indice de demande de la niche (comparaison entre veilles)
+  const favs = items.filter(i => i.window_fav != null && !i.partial).map(i => i.window_fav).sort((a, b) => a - b), n = items.length;
+  const hits = items.filter(i => i.is_hit).length;
+  return {n_hits: hits, n_gone: items.filter(i => i.gone).length, hit_rate: n ? r1(100 * hits / n, 1) : 0,
+    fav_median: median(favs), fav_p90: favs.length ? favs[Math.floor(favs.length * 0.9)] : 0,
+    per_hour: r1(n / Math.max(s.duration_min / 60, 1 / 60), 1),
+    top_brands: brandStats(items).slice(0, 3).map(b => ({brand: b.brand, score: b.score, hits: b.hits}))};
 }
 function filtersLabel(f) {
   const fmt = x => Number.isInteger(x) ? String(x) : x.toFixed(2).replace(".", ","), p = [];
@@ -472,10 +531,11 @@ async function exportLocal(id, kind) {
       ...d.brands.map((b, n) => [n + 1, b.brand, b.n_items, b.hits, csvNum(b.hit_rate, 1), csvNum(b.fav_mean, 1), csvNum(b.fav_median, 1), b.fav_max, csvNum(b.price_mean), csvNum(b.score), b.gone || 0])],
       `veille_${id}_marques.csv`);
   } else {
-    downloadCsv([["id", "titre", "marque", "prix", "devise", "taille", "état", "mise en ligne", `favoris ${s.window_min} min`, "âge du relevé (min)", "mesure", "hit", "favoris dernier relevé", "vues dernier relevé", "lien"],
-      ...d.items.map(i => [i.item_id, i.title, i.brand, csvNum(i.price), i.currency, i.size, i.condition, csvDate(i.posted_at), csvNum(i.window_fav),
-        csvNum(i.window_age != null ? i.window_age / 60 : null, 1), !i.measured ? "non mesurée" : i.gone ? "disparue (vendue ?)" : i.partial ? "partielle" : i.in_progress ? "en cours" : "complète",
-        i.is_hit ? "oui" : "non", csvNum(i.last_fav), csvNum(i.last_views), i.url])], `veille_${id}_annonces.csv`);
+    const cps = M.checkpoints(s.window_min);
+    downloadCsv([["id", "titre", "marque", "prix", "devise", "taille", "état", "mise en ligne (estimée)", ...cps.map(c => `favoris à ${c} min`), "favoris / min", "mesure", "hit", "lien"],
+      ...d.items.map(i => [i.item_id, i.title, i.brand, csvNum(i.price), i.currency, i.size, i.condition, csvDate(i.posted_at), ...cps.map(c => csvNum(i.cp_values?.[c])),
+        csvNum(i.favs_per_min), !i.measured ? "non mesurée" : i.gone ? "disparue (vendue ?)" : i.partial ? "partielle" : i.in_progress ? "en cours" : "complète",
+        i.is_hit ? "oui" : "non", i.url])], `veille_${id}_annonces.csv`);
   }
 }
 
@@ -545,28 +605,31 @@ const BRAND_COLS = [
   {key: "fav_max", label: "Fav. max", num: true},
   {key: "price_mean", label: "Prix moy.", num: true, fmt: r => eur(r.price_mean)},
   {key: "gone", label: "Vendues ?", num: true, fmt: r => r.gone ? `<b style="color:var(--ok)">${r.gone}</b>` : "0"},
+  {key: "hot", label: "🔥", num: true, hideIfZero: true, fmt: r => r.hot ? `<b style="color:var(--err)">${r.hot}</b>` : "0"},
 ];
 const brandRows = bs => bs.map((b, i) => ({...b, _rank: i + 1}));
 const brandRowClass = r => r.hits > 0 ? "hit" : "";
 
+const hotTag = i => i.hot ? `<span class="tag hot" title="Rythme de favoris qui mène au seuil avant la fin de la fenêtre">🔥 en chauffe</span>` : "";
 function measureTag(i) {
   if (!i.measured) return `<span class="tag p">non mesurée</span>`;
-  if (i.in_progress) return `<span class="tag p">en cours</span>`;
+  if (i.in_progress) return `${hotTag(i)} <span class="tag p">en cours</span>`;
   if (i.gone) return `<span class="tag hit" style="background:var(--ok)" title="Disparue des résultats avant la fin de sa fenêtre : vendue, réservée ou retirée">vendue ?</span>`;
   if (i.partial) return `<span class="tag p" title="Relevé pris avant la fin de la fenêtre">partielle</span>`;
   return "";
 }
-function itemCols(win) {
+function itemCols(win, cps, live) {
+  const tags = i => `${i.is_hit ? '<span class="tag hit">HIT</span>' : ""} ${measureTag(i)}`;
   return [
     {key: "photo", label: "", nosort: true, fmt: i => i.photo_url ? `<img loading="lazy" referrerpolicy="no-referrer" src="${esc(i.photo_url)}" alt="">` : ""},
     {key: "brand", label: "Marque", fmt: i => `<b>${esc(i.brand)}</b>`},
-    {key: "window_fav", label: `Fav. ${win} min`, num: true, fmt: i => `<b>${nf(i.window_fav)}</b> ${i.is_hit ? '<span class="tag hit">HIT</span>' : ""} ${measureTag(i)}`},
-    {key: "price", label: "Prix", num: true, fmt: i => eur(i.price)},
-    {key: "window_age", label: "Relevé à", num: true, fmt: i => i.window_age != null ? nf(i.window_age / 60, 1) + " min" : "–"},
+    {key: "rank_value", label: live ? "Demande" : `Fav. ${win} min`, num: true,
+     fmt: i => `<b>${nf(i.in_progress ? i.last_fav : i.window_fav)}</b>${i.in_progress && i.projected != null ? ` <span class="muted small">→ ~${nf(i.projected)}</span>` : ""} ${tags(i)}`},
     {key: "favs_per_min", label: "Fav./min", num: true, fmt: i => nf(i.favs_per_min, 2)},
+    // Un palier par colonne : favoris exacts à 5, 10, 15 min (interpolés entre deux relevés).
+    ...cps.filter(c => c !== win).map(c => ({key: "cp_" + c, label: `à ${c} min`, num: true, sort: i => i.cp_values?.[c], fmt: i => nf(i.cp_values?.[c])})),
+    {key: "price", label: "Prix", num: true, fmt: i => eur(i.price)},
     {key: "title", label: "Titre", cls: "title", fmt: i => `<a href="${esc(i.url)}" target="_blank" rel="noopener">${esc(i.title || "Annonce")}</a>`},
-    {key: "last_fav", label: "Fav. dernier", num: true},
-    {key: "last_views", label: "Vues", num: true, hideIfZero: true},
     {key: "size", label: "Taille"},
     {key: "posted_at", label: "En ligne", fmt: i => new Date(i.posted_at * 1000).toLocaleTimeString("fr-FR", {hour: "2-digit", minute: "2-digit"})},
   ];
@@ -605,7 +668,7 @@ async function viewWatch(token) {
   if (token !== renderToken) return;
   lastState = s;
   $("#navdot").classList.toggle("hidden", !s.running);
-  if (s.running) return renderLive(s, token);
+  if (s.running) { ALERTS.process(s); return renderLive(s, token); }
   keepAwake(false);
   renderForm(s);
 }
@@ -614,7 +677,7 @@ const FORM_KEY = "vnw-form";
 function savedForm() { try { return JSON.parse(localStorage.getItem(FORM_KEY)) || {}; } catch { return {}; } }
 
 function renderForm(s) {
-  const f = {duration_min: 60, window_min: 10, threshold: 20, interval_s: 60, ...savedForm()};
+  const f = {duration_min: 60, window_min: 15, threshold: 20, interval_s: 60, ...savedForm()};
   const last = s.session;
   $("#app").innerHTML = `
   ${last ? `<div class="notice" style="margin-bottom:16px"><span>Dernière veille <b>#${last.id}</b> · ${esc(last.filters_label)} · <span class="st ${last.status}">${STATUS[last.status] || last.status}</span></span><span class="spacer"></span><a class="btn sm" href="#session/${last.id}">Voir les résultats</a></div>` : ""}
@@ -634,7 +697,7 @@ function renderForm(s) {
     <h3 style="margin-top:22px">Paramètres de veille</h3>
     <div class="fields">
       <div><label for="dur">Durée de veille (min)</label><input type="number" id="dur" min="1" value="${f.duration_min}"></div>
-      <div><label for="win">Fenêtre de comptage (min)</label><input type="number" id="win" min="1" value="${f.window_min}"></div>
+      <div><label for="win">Fenêtre de comptage (min)</label><input type="number" id="win" min="1" value="${f.window_min}"><div class="hint">Favoris mesurés à 5, 10 et 15 min</div></div>
       <div><label for="thr">Seuil de hit (favoris)</label><input type="number" id="thr" min="1" value="${f.threshold}"></div>
       <div><label for="int">Intervalle scans (s, min 45)</label><input type="number" id="int" min="45" value="${f.interval_s}"></div>
     </div>
@@ -688,7 +751,7 @@ function renderForm(s) {
     const body = {
       url: $("#url").value.trim(), catalog_id: $("#cat").value.trim(),
       price_min: num("#pmin"), price_max: num("#pmax"),
-      duration_min: num("#dur") ?? 60, window_min: num("#win") ?? 10,
+      duration_min: num("#dur") ?? 60, window_min: num("#win") ?? 15,
       threshold: num("#thr") ?? 20, interval_s: Math.max(45, num("#int") ?? 60), demo: $("#demo").checked,
     };
     try { localStorage.setItem(FORM_KEY, JSON.stringify(body)); } catch {}
@@ -700,14 +763,64 @@ function renderForm(s) {
 
 function itemCard(i, n, win) {
   const age = i.age_min != null ? i.age_min : (i.window_age != null ? i.window_age / 60 : null);
-  return `<a class="it ${i.is_hit ? "hit" : ""}" href="${esc(i.url)}" target="_blank" rel="noopener">
+  const big = i.in_progress ? i.last_fav : i.window_fav;
+  const sub = i.in_progress ? `fav. en ${nf(age, 0)} min` : `fav. en ${win} min`;
+  return `<a class="it ${i.is_hit ? "hit" : i.hot ? "hot" : ""}" href="${esc(i.url)}" target="_blank" rel="noopener">
     <span class="rk">${n}</span>
     <img loading="lazy" referrerpolicy="no-referrer" src="${esc(i.photo_url)}" alt="">
     <span class="mid"><span class="t">${esc(i.brand)}</span>
-      <span class="s">${eur(i.price)} · ${age != null ? nf(age, 0) + " min" : "–"}${i.size ? " · " + esc(i.size) : ""}</span>
-      <span class="s">${i.is_hit ? '<span class="tag hit">HIT</span> ' : ""}${measureTag(i)}</span></span>
-    <span class="f"><b>${nf(i.window_fav)}</b><span>fav. ${win} min</span></span></a>`;
+      <span class="s">${eur(i.price)} · ${age != null ? nf(age, 0) + " min" : "–"}${i.size ? " · " + esc(i.size) : ""}${i.favs_per_min ? ` · ${nf(i.favs_per_min, 1)} fav/min` : ""}</span>
+      <span class="s">${i.is_hit ? '<span class="tag hit">HIT</span> ' : ""}${measureTag(i)}${i.in_progress && i.projected != null ? ` <span class="muted">→ ~${nf(i.projected)} à ${win} min</span>` : ""}</span></span>
+    <span class="f"><b>${nf(big)}</b><span>${sub}</span></span></a>`;
 }
+
+/* ---------- alertes : son + vibration + notification quand une annonce chauffe ou devient un hit ---------- */
+const ALERTS = {
+  on: (() => { try { return localStorage.getItem("vnw-alerts") === "1"; } catch { return false; } })(),
+  seen: new Set(), sid: null, recent: [], ctx: null,
+  async toggle(s) {
+    this.on = !this.on;
+    try { localStorage.setItem("vnw-alerts", this.on ? "1" : "0"); } catch {}
+    if (this.on) {
+      try { this.ctx ||= new (window.AudioContext || window.webkitAudioContext)(); await this.ctx.resume(); } catch {}
+      if ("Notification" in window && Notification.permission === "default") { try { await Notification.requestPermission(); } catch {} }
+      for (const a of s.alerts || []) this.seen.add(`${s.session.id}:${a.item_id}:${a.kind}`);   // pas d'avalanche à l'activation
+      this.beep(1);
+    }
+  },
+  beep(n = 2) {
+    try {
+      this.ctx ||= new (window.AudioContext || window.webkitAudioContext)();
+      for (let k = 0; k < n; k++) {
+        const o = this.ctx.createOscillator(), g = this.ctx.createGain(), t = this.ctx.currentTime + k * 0.22;
+        o.frequency.value = 880 + k * 220; o.connect(g); g.connect(this.ctx.destination);
+        g.gain.setValueAtTime(0.0001, t); g.gain.exponentialRampToValueAtTime(0.25, t + 0.02); g.gain.exponentialRampToValueAtTime(0.0001, t + 0.18);
+        o.start(t); o.stop(t + 0.2);
+      }
+    } catch {}
+  },
+  async notify(title, body, url, tag) {
+    try {
+      if (!("Notification" in window) || Notification.permission !== "granted") return;
+      const reg = navigator.serviceWorker && await navigator.serviceWorker.getRegistration();
+      if (reg) await reg.showNotification(title, {body, tag, data: {url}, icon: "/favicon.svg"});   // Android : passe par le service worker
+      else { const n = new Notification(title, {body, tag}); n.onclick = () => window.open(url, "_blank"); }
+    } catch {}
+  },
+  process(s) {
+    if (this.sid !== s.session.id) { this.sid = s.session.id; this.seen.clear(); this.recent = []; for (const a of s.alerts || []) this.seen.add(`${s.session.id}:${a.item_id}:${a.kind}`); return; }
+    const fresh = (s.alerts || []).filter(a => !this.seen.has(`${s.session.id}:${a.item_id}:${a.kind}`));
+    for (const a of fresh) {
+      this.seen.add(`${s.session.id}:${a.item_id}:${a.kind}`);
+      const title = a.kind === "hit" ? `🎯 HIT — ${a.brand} : ${a.favs} fav. en ${nf(a.age_min, 0)} min` : `🔥 ${a.brand} en chauffe : ${a.favs} fav. en ${nf(a.age_min, 0)} min`;
+      const body = `${eur(a.price)}${a.projected ? ` · projection ~${a.projected} fav. à ${s.session.window_min} min` : ""}`;
+      this.recent.unshift({...a, title, body, at: Date.now()}); this.recent = this.recent.slice(0, 6);
+      if (this.on) { this.notify(title, body, a.url, `${a.item_id}:${a.kind}`); }
+    }
+    if (this.on && fresh.length) { this.beep(fresh.some(a => a.kind === "hit") ? 3 : 2); try { navigator.vibrate?.([180, 80, 180]); } catch {} }
+  },
+};
+if ("serviceWorker" in navigator && (location.protocol === "https:" || location.hostname === "localhost")) navigator.serviceWorker.register("/sw.js").catch(() => {});
 
 function renderLive(s, token) {
   const se = s.session, win = se.window_min;
@@ -724,6 +837,7 @@ function renderLive(s, token) {
       <div><h2 style="margin:0">Veille #${se.id} ${s.demo ? `<span class="chip orange">DÉMO ×${s.speed}</span>` : ""}</h2>
       <div class="muted small">${esc(se.filters_label)} · fenêtre ${win} min · hit ≥ ${se.hit_threshold} fav. · scan /${se.interval_s} s</div></div>
       <span class="spacer"></span>
+      <button class="btn ${ALERTS.on ? "" : "ghost"} sm" id="alerts" title="Son, vibration et notification quand une annonce chauffe ou devient un hit">${ALERTS.on ? "🔔 Alertes activées" : "🔕 Activer les alertes"}</button>
       <a class="btn ghost sm" href="#session/${se.id}">Tableau complet</a>
       <button class="btn danger sm" id="stop">■ Arrêter</button>
     </div>
@@ -733,9 +847,10 @@ function renderLive(s, token) {
       <div class="seg win" style="width:${(1 - capFrac) * 100}%"><div class="fill" style="width:${winFill * 100}%"></div></div>
     </div>
     <div class="legend"><span>Captation ${se.duration_min} min</span><span class="w">Fenêtre de fin ${win} min</span></div>
-    <div class="stats">
+    <div class="stats five">
       <div class="stat"><div class="l">Annonces suivies</div><div class="v">${nf(s.n_items)}</div></div>
-      <div class="stat"><div class="l">Hits (≥ ${se.hit_threshold} fav.)</div><div class="v" style="color:var(--hit-line)">${nf(s.n_hits)}</div></div>
+      <div class="stat"><div class="l">Hits (≥ ${se.hit_threshold} fav.)</div><div class="v" style="color:var(--hit-line)">${nf(s.n_hits)}</div>${s.n_gone ? `<div class="small" style="color:var(--ok)">+ ${s.n_gone} vendue(s) ?</div>` : ""}</div>
+      <div class="stat"><div class="l">🔥 En chauffe</div><div class="v" style="color:var(--err)">${nf(s.n_hot)}</div></div>
       <div class="stat"><div class="l">Statut API</div><div class="api ${s.api.level}">${esc(s.api.text)}</div></div>
       <div class="stat"><div class="l">Cycles</div><div class="v">${nf(se.cycles)}</div><div class="small muted">${nxt}${lc.pages ? ` · dernier : ${lc.pages} p., +${lc.new}${lc.missed ? `, ${lc.missed} non revues` : ""}` : ""}</div></div>
     </div>
@@ -743,17 +858,19 @@ function renderLive(s, token) {
     ${INFO.serverless ? `<div class="hint" style="margin-top:10px">ℹ Les scans sont déclenchés par cette page : garde-la ouverte${navigator.wakeLock ? " (l'écran reste allumé)" : ""}${INFO.storage === "browser" ? "" : ", ou utilise un cron externe"}.</div>` : ""}
     ${(s.warnings || []).map(w => `<div class="warnbox">⚠ ${esc(w)}</div>`).join("")}
   </div>
+  ${ALERTS.recent.length ? `<div class="card"><h3>Dernières alertes</h3><div class="items">${ALERTS.recent.map(a => `<a class="it ${a.kind === "hit" ? "hit" : "hot"}" href="${esc(a.url)}" target="_blank" rel="noopener"><span class="mid"><span class="t">${esc(a.title)}</span><span class="s">${esc(a.body)} · ${new Date(a.at).toLocaleTimeString("fr-FR", {hour: "2-digit", minute: "2-digit"})}</span></span></a>`).join("")}</div></div>` : ""}
   <div class="grid g2">
-    <div class="card"><h2>Top 10 annonces</h2>
+    <div class="card"><h2>Top demande</h2><div class="hint" style="margin:-8px 0 12px">Annonces jeunes : favoris actuels et projection à ${win} min. Annonces terminées : favoris à ${win} min.</div>
       <div class="items">${s.top_items.length ? s.top_items.map((i, n) => itemCard(i, n + 1, win)).join("") : `<div class="empty">En attente des premières annonces postées après le lancement…</div>`}</div></div>
     <div class="card"><h2>Top marques</h2><div id="tb"></div></div>
   </div>`;
   const drawBrands = () => {
-    const cols = BRAND_COLS.filter(c => ["rank", "brand", "score", "n_items", "hits", "fav_median", "price_mean"].includes(c.key));
+    const cols = BRAND_COLS.filter(c => ["rank", "brand", "score", "n_items", "hits", "hot", "fav_median", "price_mean"].includes(c.key));
     $("#tb").innerHTML = table("live-brands", cols, brandRows(s.top_brands), "score", brandRowClass);
     bindTables($("#tb"), drawBrands);
   };
   drawBrands();
+  $("#alerts").onclick = async () => { await ALERTS.toggle(s); renderLive(s, token); };
   $("#stop").onclick = async () => {
     if (!confirm("Arrêter la veille ? Les données déjà collectées sont conservées.")) return;
     $("#stop").disabled = true; $("#stop").textContent = "Arrêt…";
@@ -792,7 +909,8 @@ async function viewSession(id, token) {
     </div>
     <div class="kv">
       <div><span>Annonces</span><b>${nf(d.items.length)}</b></div>
-      <div><span>Hits ≥ ${s.hit_threshold}</span><b style="color:var(--hit-line)">${nf(hits)}</b></div>
+      <div><span>Hits ≥ ${s.hit_threshold}</span><b style="color:var(--hit-line)">${nf(hits)} <small class="muted">(${nf(d.items.length ? 100 * hits / d.items.length : 0, 1)} %)</small></b></div>
+      <div><span>Fav. médians à ${win} min</span><b>${nf(median(d.items.filter(i => i.window_fav != null && !i.partial).map(i => i.window_fav)), 1)}</b></div>
       <div><span>Marques</span><b>${nf(d.brands.length)}</b></div>
       <div><span>Durée / fenêtre</span><b>${s.duration_min} / ${win} min</b></div>
       <div><span>Cycles · requêtes</span><b>${nf(s.cycles)} · ${nf(s.requests)}</b></div>
@@ -806,11 +924,12 @@ async function viewSession(id, token) {
   <div class="card"><h2>Classement des marques</h2><div id="tb"></div>
     <div class="hint">Vinted ne publie plus l'heure de mise en ligne : elle est estimée d'après le numéro de l'annonce et les mises à jour de l'index Vinted (précision ≈ ±30 s).
       « Vendue ? » = annonce disparue des résultats avant la fin de sa fenêtre.
-      Score = médiane des favoris × min(annonces, 5)/5 + 2 × hits. Lignes orange = au moins un hit. Clique sur une colonne pour trier.</div></div>
+      Favoris aux paliers (5, 10, 15 min) interpolés entre les deux relevés qui les encadrent.
+      Score = médiane des favoris × min(annonces, 5)/5 + 2 × hits + 3 × vendues ?. Lignes orange = au moins un hit. Clique sur une colonne pour trier.</div></div>
   <div class="card"><h2>Annonces</h2><div id="ti"></div></div>`;
   const draw = () => {
     $("#tb").innerHTML = table("brands", BRAND_COLS, brandRows(d.brands), "score", brandRowClass);
-    $("#ti").innerHTML = table("items", itemCols(win), d.items, "window_fav", i => i.is_hit ? "hit" : "");
+    $("#ti").innerHTML = table("items", itemCols(win, M.checkpoints(win), d.live), d.items, "rank_value", i => i.is_hit ? "hit" : "");
     bindTables($("#app"), draw);
   };
   draw();
@@ -835,7 +954,8 @@ async function viewHistory(token) {
         <div><div class="top"><b>#${s.id}</b><span class="muted small">${dt(s.created_at)}</span>
           <span class="st ${s.status}">${STATUS[s.status] || s.status}</span>${s.demo ? '<span class="chip orange">DÉMO</span>' : ""}</div>
           <div style="font-weight:600;margin-top:4px">${esc(s.filters_label)}</div>
-          <div class="meta">${nf(s.n_items)} annonces · ${nf(s.n_hits)} hits · ${s.duration_min} min, fenêtre ${s.window_min} min, seuil ${s.hit_threshold}</div>
+          <div class="meta">${nf(s.n_items)} annonces (${nf(s.per_hour, 0)}/h) · ${s.duration_min} min, fenêtre ${s.window_min} min, seuil ${s.hit_threshold}</div>
+          <div class="demand"><span title="Favoris médians à ${s.window_min} min"><b>${nf(s.fav_median, 1)}</b> fav. méd.</span><span title="10 % des annonces font au moins ça"><b>${nf(s.fav_p90)}</b> fav. top 10 %</span><span><b style="color:var(--hit-line)">${nf(s.hit_rate, 1)} %</b> de hits (${nf(s.n_hits)})</span>${s.n_gone ? `<span><b style="color:var(--ok)">${nf(s.n_gone)}</b> vendues ?</span>` : ""}</div>
           <div class="chips">${s.top_brands.length ? s.top_brands.map((b, i) => `<span class="chip ${b.hits ? "orange" : ""}">${["🥇", "🥈", "🥉"][i]} ${esc(b.brand)} · ${nf(b.score, 1)}</span>`).join("") : `<span class="chip gray">aucune annonce</span>`}</div></div>
         <div class="row"><a class="btn sm" href="#session/${s.id}">Voir</a>
           ${s.status === "running" ? "" : `<button class="btn ghost sm" data-del="${s.id}" title="Supprimer">🗑</button>`}</div>

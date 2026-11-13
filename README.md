@@ -53,7 +53,7 @@ qui passe par ta connexion. Le mode démo, lui, marche partout.
   Elle comprend `catalog[]`, `price_from`, `price_to`, `brand_ids[]`, `size_ids[]`, `status_ids[]`,
   `search_text` et le format `/catalog/79-sweats`.
 - **Ou en manuel** : ID de catégorie + prix min/max (remplacent ceux de l'URL s'ils sont remplis).
-- **Paramètres** : durée de veille (défaut 60 min), fenêtre de comptage (10 min), seuil de hit (20 favoris),
+- **Paramètres** : durée de veille (défaut 60 min), fenêtre de comptage (15 min, favoris mesurés à 5, 10 et 15 min), seuil de hit (20 favoris),
   intervalle entre scans (60 s, minimum 45 s).
 
 Une seule veille à la fois. Après la durée de veille, l'app continue pendant la durée de la fenêtre pour
@@ -84,11 +84,21 @@ si le créneau de mesure d'une annonce (fenêtre → fenêtre + 60 s) risquait d
 **« Vendue ? »** : une annonce qui disparaît des résultats avant la fin de sa fenêtre a très probablement
 été vendue (ou réservée / retirée). C'est compté par marque : un excellent signal de demande.
 
-### Lire les résultats
-- **Favoris fenêtre** = favoris au dernier relevé pris avant *fenêtre + 60 s* d'âge.
-  « partielle » = ce relevé a été pris trop tôt (veille arrêtée, pause anti-blocage…).
-- **Hit** = annonce qui atteint le seuil dans la fenêtre (ligne orange).
-- **Score marque** = médiane des favoris × min(nb d'annonces, 5)/5 + 2 × hits.
+### Repérer les articles en demande (le cœur de l'app)
+- **Favoris aux paliers 5, 10 et 15 min** (fenêtre par défaut : 15 min) : pour chaque palier, l'app garde
+  le relevé juste avant et juste après, et **interpole** : on obtient la valeur exacte à 10 min même si les
+  scans tombent à 9 min 40 et 10 min 35. Les scans sont avancés automatiquement pour encadrer chaque palier.
+- **🔥 En chauffe** : dès 2 min, le rythme de favoris donne une **projection** à la fin de la fenêtre
+  (prudente : les favoris ralentissent avec le temps). Si elle atteint le seuil, l'annonce est signalée
+  **avant** d'être un hit. En démo, les futurs hits sont signalés en moyenne à ~3 min au lieu de 15.
+- **HIT** : seuil atteint pendant la fenêtre (déclaré dès qu'il est atteint, sans attendre la fin).
+- **Vendue ?** : annonce disparue des résultats avant la fin de sa fenêtre (vendue, réservée ou retirée) :
+  le signal de demande le plus fort.
+- **🔔 Alertes** (bouton sur l'écran de veille) : son, vibration et notification dès qu'une annonce chauffe
+  ou devient un hit. Sur téléphone, garde la page ouverte (l'écran reste allumé) ; autorise les notifications.
+- **Score marque** = médiane des favoris × min(nb d'annonces, 5)/5 + 2 × hits + 3 × vendues ?.
+- **Indice de demande de la niche** (historique) : favoris médians à la fin de la fenêtre, favoris du top
+  10 %, % de hits, nombre de « vendues ? » et annonces/heure. Pour comparer les niches d'un jour à l'autre.
 
 ## Mode démo
 Coche **« Mode démo »** avant de lancer : flux d'annonces simulé, temps accéléré ×30 (1 min = 2 s),

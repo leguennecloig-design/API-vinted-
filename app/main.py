@@ -21,7 +21,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel, Field
 
-from . import tracker, vinted
+from . import measure, tracker, vinted
 from .db import DB, brand_stats, enrich_items
 from .tracker import MIN_INTERVAL
 
@@ -115,7 +115,7 @@ class StartBody(BaseModel):
     price_min: float | None = None
     price_max: float | None = None
     duration_min: int = Field(60, ge=1, le=24 * 60)
-    window_min: int = Field(10, ge=1, le=180)
+    window_min: int = Field(15, ge=1, le=180)
     threshold: int = Field(20, ge=1)
     interval_s: int = Field(60, ge=MIN_INTERVAL)
     demo: bool = False
@@ -128,6 +128,16 @@ class UrlBody(BaseModel):
 @app.get("/")
 def index():
     return FileResponse(PUBLIC / "index.html", headers={"Cache-Control": "no-cache"})
+
+
+@app.get("/sw.js")
+def service_worker():
+    return FileResponse(PUBLIC / "sw.js", media_type="application/javascript", headers={"Cache-Control": "no-cache"})
+
+
+@app.get("/favicon.svg")
+def favicon():
+    return FileResponse(PUBLIC / "favicon.svg", media_type="image/svg+xml")
 
 
 @app.get("/api/info")
@@ -267,11 +277,9 @@ def sessions():
     out = []
     for s in db.list_sessions():
         summ = s.get("summary")
-        if not summ:  # veille en cours : calcul à la volée
+        if not summ or "fav_median" not in summ:  # veille en cours (ou ancienne) : calcul à la volée
             items = enrich_items(db.items(s["id"]), s["window_min"], s["hit_threshold"])
-            brands = brand_stats(items)
-            summ = {"n_hits": sum(1 for i in items if i["is_hit"]),
-                    "top_brands": [{"brand": b["brand"], "score": b["score"], "hits": b["hits"]} for b in brands[:3]]}
+            summ = measure.session_summary(items, s)
         s.update(summ)
         out.append(s)
     return out
@@ -334,18 +342,15 @@ def _ts(t: float | None) -> str:
 @app.get("/api/sessions/{sid}/export/items.csv")
 def export_items(sid: int):
     s, items, _, _ = _session_data(sid)
-    rows = [["id", "titre", "marque", "prix", "devise", "taille", "état", "mise en ligne",
-             f"favoris {s['window_min']} min", "âge du relevé (min)", "mesure", "hit",
-             "favoris dernier relevé", "vues dernier relevé", "lien"]]
-    for i in items:
+    cps = measure.checkpoints(s["window_min"])
+    rows = [["id", "titre", "marque", "prix", "devise", "taille", "état", "mise en ligne (estimée)",
+             *[f"favoris à {c} min" for c in cps], "favoris / min", "mesure", "hit", "lien"]]
+    for i in sorted(items, key=lambda i: -(i["rank_value"] or 0)):
         mesure = "non mesurée" if not i["measured"] else "disparue (vendue ?)" if i.get("gone") else \
-            "partielle" if i["partial"] else \
-            "en cours" if i["in_progress"] else "complète"
+            "partielle" if i["partial"] else "en cours" if i["in_progress"] else "complète"
         rows.append([i["item_id"], i["title"], i["brand"], _num(i["price"]), i["currency"], i["size"],
-                     i["condition"], _ts(i["posted_at"]), _num(i["window_fav"]),
-                     _num(i["window_age"] / 60 if i["window_age"] is not None else None, 1),
-                     mesure, "oui" if i["is_hit"] else "non", _num(i["last_fav"]), _num(i["last_views"]),
-                     i["url"]])
+                     i["condition"], _ts(i["posted_at"]), *[_num(i["cp_values"].get(str(c))) for c in cps],
+                     _num(i["favs_per_min"]), mesure, "oui" if i["is_hit"] else "non", i["url"]])
     return _csv_response(rows, f"veille_{sid}_annonces.csv")
 
 
@@ -353,7 +358,7 @@ def export_items(sid: int):
 def export_brands(sid: int):
     s, _, brands, _ = _session_data(sid)
     rows = [["rang", "marque", "annonces", "hits", "taux de hit (%)", "favoris moyens",
-             "favoris médians", "favoris max", "prix moyen", "score", "disparues (vendues ?)"]]
+             "favoris médians", "favoris max", "prix moyen", "score", "disparues (vendues ?)"]]  # noqa
     for n, b in enumerate(brands, 1):
         rows.append([n, b["brand"], b["n_items"], b["hits"], _num(b["hit_rate"], 1), _num(b["fav_mean"], 1),
                      _num(float(b["fav_median"]), 1), b["fav_max"], _num(b["price_mean"]), _num(b["score"]),
