@@ -193,7 +193,8 @@ class VintedClient:
             if r.status_code in (403, 429):
                 raise RateLimited(r.status_code)
             if r.status_code != 200:
-                raise ApiError(f"HTTP {r.status_code}")
+                snippet = " ".join((r.text or "")[:160].split())
+                raise ApiError(f"HTTP {r.status_code} sur {str(r.url)[:120]} — {snippet}")
             try:
                 data = r.json()
             except Exception as e:
