@@ -79,7 +79,13 @@ def filters_label(f: dict) -> str:
     if f.get("search_text"):
         parts.append(f"« {f['search_text']} »")
     if f.get("catalog_ids"):
-        parts.append("cat. " + ",".join(map(str, f["catalog_ids"])))
+        names = f.get("catalog_names") or {}
+        def short(path):  # « Femmes › Chaussures › Baskets » -> « Baskets (Femmes) »
+            a = path.split(" › ")
+            return f"{a[-1]} ({a[0]})" if len(a) > 1 else a[0]
+        labels = [short(names.get(str(c)) or names.get(c)) if (names.get(str(c)) or names.get(c)) else f"cat. {c}"
+                  for c in f["catalog_ids"]]
+        parts.append(", ".join(labels[:4]) + (f" +{len(labels) - 4}" if len(labels) > 4 else ""))
     pf, pt = f.get("price_from"), f.get("price_to")
     if pf is not None or pt is not None:
         parts.append(f"{_fmt(pf) if pf is not None else '0'}–{_fmt(pt) if pt is not None else '∞'} €")
@@ -353,8 +359,18 @@ class DemoClient:
             cut -= 120
 
         pf, pt = filters.get("price_from"), filters.get("price_to")
+        # Plusieurs catégories : chaque annonce démo appartient à l'une d'elles (répartition fixe par ID).
+        all_cats = list(self.filters.get("catalog_ids") or [])
+        want = list(filters.get("catalog_ids") or [])
+
+        def in_cat(i: dict) -> bool:
+            if len(all_cats) < 2 or len(want) != 1:
+                return True
+            return all_cats[(i["id"] // 7) % len(all_cats)] == want[0]
 
         def available(i: dict) -> bool:
+            if not in_cat(i):
+                return False
             if (pf is not None and i["price"] < pf) or (pt is not None and i["price"] > pt):
                 return False  # filtre de prix (utile pour les tranches de prix automatiques)
             sold = random.Random(f"{self.seed}:sold:{i['id']}")

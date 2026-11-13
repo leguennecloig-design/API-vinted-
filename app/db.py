@@ -51,7 +51,7 @@ SESSION_COLS = """
 """
 ITEM_COLS = ["session_id", "item_id", "title", "brand", "price", "currency", "size", "condition", "url",
              "photo_url", "posted_at", "first_seen", "first_age", "last_age", "last_fav", "last_views",
-             "window_fav", "window_age", "cps"]
+             "window_fav", "window_age", "cps", "catalog_id"]
 
 
 def _schema(pg: bool) -> list[str]:
@@ -65,7 +65,7 @@ def _schema(pg: bool) -> list[str]:
             price {real}, currency TEXT, size TEXT, condition TEXT, url TEXT, photo_url TEXT,
             posted_at {real} NOT NULL, first_seen {real} NOT NULL, first_age {real} NOT NULL,
             last_age {real}, last_fav INTEGER, last_views INTEGER, window_fav INTEGER, window_age {real},
-            cps TEXT, PRIMARY KEY (session_id, item_id))""",
+            cps TEXT, catalog_id {big}, PRIMARY KEY (session_id, item_id))""",
         f"""CREATE TABLE IF NOT EXISTS snapshots (
             session_id {big} NOT NULL, item_id {big} NOT NULL, ts {real} NOT NULL,
             age_s {real} NOT NULL, favs INTEGER NOT NULL, views INTEGER)""",
@@ -84,7 +84,8 @@ class DB:
             # Migration des bases créées avant la nouvelle API Vinted (sept. 2026).
             big = "BIGINT" if self.pg else "INTEGER"
             for table, col, typ in (("sessions", "id_floor", big), ("sessions", "max_seen_id", big),
-                                    ("sessions", "calib", "TEXT"), ("items", "cps", "TEXT")):
+                                    ("sessions", "calib", "TEXT"), ("items", "cps", "TEXT"),
+                                    ("items", "catalog_id", big)):
                 try:
                     if self.pg:
                         self.execute(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {col} {typ}")

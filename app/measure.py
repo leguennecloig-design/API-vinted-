@@ -156,3 +156,29 @@ def session_summary(items: list[dict], s: dict) -> dict:
         "per_hour": round(n / hours, 1),
         "top_brands": [{"brand": b["brand"], "score": b["score"], "hits": b["hits"]} for b in brands[:3]],
     }
+
+
+def cat_stats(items: list[dict], names: dict | None = None, hours: float = 1.0) -> list[dict]:
+    """Comparaison des catégories surveillées : volume, hits, favoris médians, vendues ?."""
+    names = names or {}
+    groups: dict = {}
+    for it in items:
+        groups.setdefault(it.get("catalog_id"), []).append(it)
+    out = []
+    for cat, its in groups.items():
+        favs = [i["window_fav"] for i in its if i.get("window_fav") is not None and not i.get("partial")]
+        hits = sum(1 for i in its if i["is_hit"])
+        gone = sum(1 for i in its if i.get("gone"))
+        n = len(its)
+        med = statistics.median(favs) if favs else 0
+        out.append({
+            "catalog_id": cat,
+            "name": (names.get(str(cat)) or names.get(cat) or ("Toutes" if cat is None else f"Catégorie {cat}")),
+            "n_items": n, "per_hour": round(n / max(hours, 1 / 60), 1), "hits": hits,
+            "hit_rate": round(100 * hits / n, 1) if n else 0, "fav_median": med,
+            "fav_p90": sorted(favs)[int(len(favs) * 0.9)] if favs else 0, "gone": gone,
+            "hot": sum(1 for i in its if i.get("hot")),
+            "score": round(med * min(n, 5) / 5 + HIT_WEIGHT * hits + GONE_WEIGHT * gone, 2),
+        })
+    out.sort(key=lambda c: (c["hit_rate"], c["fav_median"]), reverse=True)
+    return out

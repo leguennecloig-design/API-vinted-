@@ -48,6 +48,15 @@ qui passe par ta connexion. Le mode démo, lui, marche partout.
 
 ## Utilisation
 
+- **Catégories** : choisis une ou plusieurs catégories dans le sélecteur (recherche ou arbre complet des
+  ~2 950 catégories Vinted, lu sur vinted.fr et mis en cache 7 jours). Cocher une catégorie parente inclut
+  ses sous-catégories. Chaque catégorie est surveillée par sa propre recherche, puis comparée aux autres
+  (tableau « Comparaison des catégories » : % de hits, favoris médians, vendues ?, volume/heure).
+- **Temps réel** : Vinted publie ses nouvelles annonces par lots (~toutes les 2 à 2,7 min). L'app apprend ce
+  rythme et, quand un lot est attendu, « sonde » la page 1 toutes les 15 s (1 requête) pour lancer le scan
+  dès sa publication : en démo, un nouveau lot est détecté en ~20 s en moyenne (au lieu de ~30 s).
+  L'écran se rafraîchit toutes les 2 s.
+
 - **URL de recherche** (le plus simple) : fais ta recherche sur vinted.fr avec tous tes filtres (catégorie,
   prix, marques, tailles, état), puis copie l'URL de la barre d'adresse et colle-la dans l'app.
   Elle comprend `catalog[]`, `price_from`, `price_to`, `brand_ids[]`, `size_ids[]`, `status_ids[]`,

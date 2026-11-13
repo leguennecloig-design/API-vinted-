@@ -6,6 +6,7 @@ Les ticks viennent de la page ouverte, d'un cron externe, ou d'une boucle locale
 from __future__ import annotations
 
 import json
+import os
 import logging
 import random
 import time
@@ -19,6 +20,7 @@ log = logging.getLogger("tracker")
 MAX_PAGES = 10          # Vinted refuse les pages au-delà de 10 (960 résultats)
 BAND_CAPACITY = 800     # profondeur utile par tranche de prix (marge sous les 960 résultats accessibles)
 MAX_BANDS = 6
+PROBE_EVERY_S = float(os.environ.get("VNW_PROBE_S", "15"))      # écart mini entre deux sondes de la page 1
 EXPECT_BATCH_S = 100     # au-delà, un nouveau lot d'index Vinted est attendu (période ~2-2,7 min)
 DRAFT_GAP_S = 360        # écart ID/1re apparition au-delà duquel une annonce est un brouillon publié tard
 BACKOFF = [30, 60, 120, 240, 480, 600]  # secondes, en cas de 403 / 429
@@ -114,8 +116,17 @@ def tick(db: DB) -> dict:
         upd.update(backoff_i=0, api_level="ok",
                    api_text="OK — référence prise, la captation commence" if baseline else "OK")
         now = clock_now(s)
-        nxt = now + (20 if baseline else s["interval_s"] + random.uniform(0, 6))
-        nxt = schedule_next(now, nxt, (s.get("_rows") or {}).values(), s["window_min"] * 60)
+        lc = upd.get("last_cycle") or {}
+        prev_lc = s.get("last_cycle") or {}
+        if lc.get("probe") and not lc.get("probe_hit") and prev_lc.get("full_next"):
+            full_next = prev_lc["full_next"]  # sonde sans nouveau lot : le scan complet prévu est inchangé
+            upd["api_text"] = "OK — en attente du prochain lot Vinted"
+        else:
+            full_next = now + (20 if baseline else s["interval_s"] + random.uniform(0, 6))
+            full_next = schedule_next(now, full_next, (s.get("_rows") or {}).values(), s["window_min"] * 60)
+        nxt, is_probe = (full_next, False) if baseline else plan_next(now, full_next, s.get("_calib") or [])
+        lc.update(next_probe=is_probe, full_next=full_next)
+        upd["last_cycle"] = lc
         upd["next_tick_at"] = min(nxt, s["final_end"] + 1)
     except vinted.RateLimited as e:
         delay = BACKOFF[min(s["backoff_i"], len(BACKOFF) - 1)]
@@ -236,21 +247,44 @@ def scan_pages(client, filters: dict, active_ids: set[int], max_seen: int | None
         sleep_fn(random.uniform(0.8, 1.8))
 
 
-def needed_depth(items, s: dict, now: float) -> int:
-    """Nombre de résultats à parcourir pour revoir la plus ancienne annonce encore à mesurer.
+def needed_depth(items, s: dict, now: float) -> dict:
+    """Profondeur à parcourir, par catégorie, pour revoir la plus ancienne annonce encore à mesurer.
 
     Vinted continue de publier en haut des résultats (y compris après la fin de la captation) : la
-    profondeur ≈ rythme de mise en ligne observé × âge de la plus ancienne annonce active.
+    profondeur ≈ rythme de mise en ligne observé (dans la catégorie) × âge de la plus ancienne annonce active.
+    Renvoie {catégorie (ou None): profondeur}.
     """
     items = list(items)
     W = s["window_min"] * 60
-    act = [i for i in items if now - i["posted_at"] <= W + 150]
-    if not act:
-        return 0
     elapsed = max(60.0, min(now, s["capture_end"]) - s["start_ts"])
-    rate = sum(1 for i in items if i["posted_at"] <= s["capture_end"]) / (elapsed / 60)
-    oldest = max(now - i["posted_at"] for i in act) / 60
-    return int(max(len(act) + 150, rate * oldest * 1.1 + 50))
+    out: dict = {}
+    for cat in {i.get("catalog_id") for i in items}:
+        its = [i for i in items if i.get("catalog_id") == cat]
+        act = [i for i in its if now - i["posted_at"] <= W + 150]
+        if not act:
+            continue
+        rate = sum(1 for i in its if i["posted_at"] <= s["capture_end"]) / (elapsed / 60)
+        oldest = max(now - i["posted_at"] for i in act) / 60
+        out[cat] = int(max(len(act) + 150, rate * oldest * 1.1 + 50))
+    return out
+
+
+def batch_period(calib: list) -> float:
+    """Période de publication des lots d'index Vinted, apprise (médiane des écarts), 150 s par défaut."""
+    gaps = sorted(b[0] - a[0] for a, b in zip(calib[1:], calib[2:]) if b[0] > a[0])
+    return min(300.0, max(60.0, gaps[len(gaps) // 2])) if len(gaps) >= 2 else 150.0
+
+
+def plan_next(now: float, full_next: float, calib: list, probe_done: bool = False) -> tuple[float, bool]:
+    """Prochain passage : (heure, sonde ?). Si un nouveau lot d'index est attendu avant le prochain scan
+    complet, on « sonde » la page 1 toutes les 15 s autour de l'heure attendue pour le voir au plus tôt."""
+    if not calib:
+        return full_next, False
+    expected = calib[-1][0] + batch_period(calib)
+    probe_at = max(now + PROBE_EVERY_S, expected - 5)
+    if probe_at < full_next - PROBE_EVERY_S and now < expected + 120:
+        return probe_at, True
+    return full_next, False
 
 
 def plan_bands(filters: dict, active_prices: list[float], depth: int | None = None) -> list[tuple]:
@@ -276,32 +310,62 @@ def plan_bands(filters: dict, active_prices: list[float], depth: int | None = No
             for k in range(len(edges) - 1)]
 
 
-def scan_all(client, filters: dict, active: dict[int, float | None], max_seen: int | None, now_fn, sleep_fn,
-             out: list, meta: dict, warn, baseline: bool = False, depth: int | None = None,
-             expect_new: bool = False) -> None:
-    """Scan complet : une recherche, ou plusieurs tranches de prix si nécessaire (voir plan_bands)."""
-    meta["expect_new"] = expect_new and not baseline
-    bands = [(filters.get("price_from"), filters.get("price_to"))] if baseline else \
-        plan_bands(filters, list(active.values()), depth)
-    meta["bands"] = len(bands)
+def scan_all(client, filters: dict, active: dict, max_seen: int | None, now_fn, sleep_fn,
+             out: list, meta: dict, warn, baseline: bool = False, depth=None,
+             expect_new: bool = False, probe: bool = False) -> None:
+    """Scan complet : une recherche par catégorie choisie, chacune découpée en tranches de prix si besoin.
+
+    `active` = {id: (prix, catégorie)} des annonces en cours de mesure. Chaque annonce vue reçoit
+    it["cat"] = catégorie de la recherche qui l'a trouvée.
+    Sonde (`probe`) : seulement la page 1 de la catégorie la plus active ; si un nouveau lot d'index y
+    apparaît, on enchaîne aussitôt sur le scan complet, sinon on s'arrête là (1 requête).
+    """
+    act_info = {i: (v if isinstance(v, (tuple, list)) else (v, None)) for i, v in active.items()}
+    cats = list(filters.get("catalog_ids") or []) or [None]
+    multi = len(cats) > 1
+    depth = depth if isinstance(depth, dict) else {None: depth} if depth else {}
+    by_cat = {c: {i: p for i, (p, ic) in act_info.items() if not multi or ic == c} for c in cats}
     seen: set[int] = set()
-    for k, (lo, hi) in enumerate(bands):
+
+    def run(cat, lo, hi, act, ms, max_pages):
         f = dict(filters, price_from=lo, price_to=hi)
-        act = {i for i, p in active.items() if p is None or ((lo is None or p >= lo) and (hi is None or p <= hi))} \
-            if len(bands) > 1 else set(active)
-        # Contrôle « copie en cache » par tranche : comparé à la plus récente annonce suivie DE la tranche.
-        ms = (max(act) if act else None) if len(bands) > 1 else max_seen
-        if k > 0:
-            meta["expect_new"] = False
+        if cat is not None:
+            f["catalog_ids"] = [cat]
         part: list = []
         try:
-            scan_pages(client, f, act, ms, now_fn, sleep_fn, part, meta, warn, max_pages=1 if baseline else MAX_PAGES)
+            scan_pages(client, f, act, ms, now_fn, sleep_fn, part, meta, warn, max_pages=max_pages)
         finally:
             for it in part:
                 if it["item_id"] not in seen:
                     seen.add(it["item_id"])
-                    out.append(it)
-        if k + 1 < len(bands):
+                    out.append({**it, "cat": cat})
+
+    if probe and not baseline and max_seen:
+        c0 = max(cats, key=lambda c: len(by_cat[c]))
+        before = meta.get("max_first") or 0
+        run(c0, filters.get("price_from"), filters.get("price_to"), set(), max_seen, 1)
+        meta["probe"] = True
+        if (meta.get("max_first") or before) <= max_seen:
+            meta["bands"] = 0
+            return  # pas de nouveau lot : la sonde s'arrête là
+        meta["probe_hit"] = True
+        sleep_fn(random.uniform(0.5, 1.0))
+    meta["expect_new"] = expect_new and not baseline and not meta.get("probe_hit")
+    units = []
+    for c in cats:
+        prices = by_cat[c]
+        bands = [(filters.get("price_from"), filters.get("price_to"))] if baseline else \
+            plan_bands(filters, list(prices.values()), depth.get(c if multi else None, depth.get(c)))
+        units += [(c, lo, hi, prices) for lo, hi in bands]
+    meta["bands"] = len(units)
+    for k, (c, lo, hi, prices) in enumerate(units):
+        act = {i for i, p in prices.items() if p is None or ((lo is None or p >= lo) and (hi is None or p <= hi))}
+        # Contrôle « copie en cache » par recherche : comparé à la plus récente annonce suivie de la recherche.
+        ms = (max(act) if act else None) if len(units) > 1 else max_seen
+        if k > 0:
+            meta["expect_new"] = False
+        run(c, lo, hi, act, ms, 1 if baseline else MAX_PAGES)
+        if k + 1 < len(units):
             sleep_fn(random.uniform(0.8, 1.8))
     if meta.get("limited"):
         warn("Limite de Vinted (10 pages par recherche) atteinte : certaines annonces ont pu manquer des "
@@ -378,6 +442,7 @@ def classify(seen: list[dict], rows: dict, s: dict, calib: list) -> int:
                 continue  # postée hors captation
             row = {c: it.get(c) for c in ("title", "brand", "price", "currency", "size",
                                             "condition", "url", "photo_url")}
+            row["catalog_id"] = it.get("cat")
             row.update(session_id=s["id"], item_id=iid, posted_at=posted, first_seen=now,
                        first_age=now - posted, window_fav=None, window_age=None, cps={})
             new += 1
@@ -445,19 +510,22 @@ def _cycle(db: DB, s: dict, client, upd: dict):
     new = 0
     rows = dict(existing)
     try:
-        scan_all(client, s["filters"], {i: existing[i].get("price") for i in active}, s.get("max_seen_id"),
-                 lambda: clock_now(s), lambda sec: _sleep(s, sec), seen, meta, lambda m: _warn(db, s, m),
-                 baseline=baseline, depth=needed_depth(existing.values(), s, clock_now(s)),
-                 expect_new=bool(s.get("calib")) and clock_now(s) - s["calib"][-1][0] > EXPECT_BATCH_S)
+        probe = bool((s.get("last_cycle") or {}).get("next_probe")) and not baseline
+        scan_all(client, s["filters"], {i: (existing[i].get("price"), existing[i].get("catalog_id")) for i in active},
+                 s.get("max_seen_id"), lambda: clock_now(s), lambda sec: _sleep(s, sec), seen, meta,
+                 lambda m: _warn(db, s, m), baseline=baseline, depth=needed_depth(existing.values(), s, clock_now(s)),
+                 expect_new=bool(s.get("calib")) and clock_now(s) - s["calib"][-1][0] > EXPECT_BATCH_S, probe=probe)
         completed = True
     finally:
         new, u = apply_scan(s, rows, seen, meta, s.get("calib") or [])
+        s["_calib"] = u.get("calib", s.get("calib") or [])
         if "calib" in u:
             u["calib"] = json.dumps(u["calib"])
         upd.update(u)
         s["_rows"] = rows
         seen_ids = {i["item_id"] for i in seen}
-        missed_ids = count_misses(rows, active, seen_ids, completed and not meta.get("limited"))
+        full = completed and not meta.get("limited") and not (meta.get("probe") and not meta.get("probe_hit"))
+        missed_ids = count_misses(rows, active, seen_ids, full)
         changed = [r for iid, r in rows.items() if iid in seen_ids or iid in missed_ids]
         if changed and not baseline:
             db.upsert_items(changed)
@@ -470,9 +538,10 @@ def _cycle(db: DB, s: dict, client, upd: dict):
         upd["last_cycle"] = {"pages": meta["pages"], "new": new, "snaps": len(snaps),
                              "duration_s": round(time.time() - t0, 1), "at": clock_now(s),
                              "baseline": baseline, "stale": meta.get("stale", 0), "missed": missed,
-                             "bands": meta.get("bands", 1),
+                             "bands": meta.get("bands", 1), "probe": bool(meta.get("probe")),
+                             "probe_hit": bool(meta.get("probe_hit")),
                              "t_first": meta.get("t_first")}
-    if completed:
+    if completed and not (meta.get("probe") and not meta.get("probe_hit")):
         at = clock_now(s)
         upd.update(cycles=s["cycles"] + 1, last_cycle_at=at)
         s["last_cycle_at_new"] = at
@@ -527,4 +596,7 @@ def state(db: DB) -> dict:
                     "projected": i["projected"]} for i in items if (i["is_hit"] or i["hot"]) and i["in_progress"]],
         "top_items": top,
         "top_brands": brands[:10],
+        "top_cats": measure.cat_stats(items, s["filters"].get("catalog_names"),
+                                      max(1 / 60, (min(t, s["capture_end"]) - s["start_ts"]) / 3600))
+        if len(s["filters"].get("catalog_ids") or []) > 1 else [],
     }

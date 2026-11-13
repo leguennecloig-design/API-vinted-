@@ -156,6 +156,14 @@ td img{width:34px;height:44px;object-fit:cover;border-radius:6px;vertical-align:
 .kv b{display:block;font-size:17px}
 .kv span{font-size:12px;color:var(--muted);font-weight:600}
 .hidden{display:none!important}
+.catpick{border:1px solid var(--line);border-radius:12px;padding:10px;background:var(--input)}
+.catpick .chips{margin:0 0 8px}
+.catpick input[type=text]{background:var(--card)}
+.cattree{max-height:300px;overflow:auto;margin-top:8px;border-top:1px solid var(--line);padding-top:6px}
+.catrow{display:flex;align-items:center;gap:4px;padding:3px 8px;font-size:14px}
+.catrow label{display:flex;gap:8px;align-items:center;margin:0;font-weight:500;color:var(--text);cursor:pointer;font-size:14px}
+.catrow input{accent-color:var(--brand);width:16px;height:16px}
+.catrow .tw{width:22px;border:0;background:none;color:var(--muted);cursor:pointer;font-size:13px;padding:0;flex:none}
 </style>
 </head>
 <body>
@@ -255,7 +263,12 @@ const L = {
       f = (await serverApi("/api/parse-url", {method: "POST", body: JSON.stringify({url: b.url})})).filters;
     } else f = {catalog_ids: [], price_from: null, price_to: null, brand_ids: [], size_ids: [], status_ids: [], search_text: ""};
     const ids = (b.catalog_id || "").replace(/;/g, ",").split(",").map(x => x.trim()).filter(x => /^\d+$/.test(x)).map(Number);
+    for (const c of b.catalog_ids || []) if (!ids.includes(+c)) ids.push(+c);
     if (ids.length) f.catalog_ids = ids;
+    if (f.catalog_ids?.length) {
+      await loadCats().catch(() => {});
+      f.catalog_names = Object.fromEntries(f.catalog_ids.map(c => [c, (b.catalog_names || {})[c] || catPath(c)]));
+    }
     if (b.price_min != null) f.price_from = b.price_min;
     if (b.price_max != null) f.price_to = b.price_max;
     if (!(f.catalog_ids.length || f.search_text || f.brand_ids.length) && !b.demo) throw new Error("Indique une URL de recherche ou un ID de catégorie.");
@@ -309,15 +322,20 @@ const L = {
       const active = activeItems.map(i => i.item_id);
       // [id, prix] : le serveur découpe en tranches de prix si trop d'annonces à suivre pour 10 pages.
       // Profondeur à parcourir = rythme de mise en ligne observé × âge de la plus ancienne annonce active (cf. tracker.needed_depth).
-      let depth = 0;
+      const depth = {};   // par catégorie
       if (activeItems.length) {
         const all = Object.values(rec.items), elapsed = Math.max(60, Math.min(now0, s.capture_end) - s.start_ts);
-        const rate = all.filter(i => i.posted_at <= s.capture_end).length / (elapsed / 60);
-        const oldest = Math.max(...activeItems.map(i => now0 - i.posted_at)) / 60;
-        depth = Math.round(Math.max(activeItems.length + 150, rate * oldest * 1.1 + 50));
+        for (const cat of new Set(all.map(i => i.catalog_id ?? null))) {
+          const its = all.filter(i => (i.catalog_id ?? null) === cat), act = its.filter(i => now0 - i.posted_at <= W0 + 150);
+          if (!act.length) continue;
+          const rate = its.filter(i => i.posted_at <= s.capture_end).length / (elapsed / 60);
+          const oldest = Math.max(...act.map(i => now0 - i.posted_at)) / 60;
+          depth[cat ?? "null"] = Math.round(Math.max(act.length + 150, rate * oldest * 1.1 + 50));
+        }
       }
       const expect_new = !baseline && !!s.calib?.length && now0 - s.calib[s.calib.length - 1][0] > 100;   // nouveau lot attendu
-      const body = {filters: s.filters, active: activeItems.map(i => [i.item_id, i.price]), depth, expect_new, max_seen: s.max_seen_id, baseline, cookies: rec.cookies,
+      const probe = !baseline && !!s.last_cycle?.next_probe;   // sonde de la page 1 (nouveau lot attendu)
+      const body = {filters: s.filters, active: activeItems.map(i => [i.item_id, i.price, i.catalog_id ?? null]), depth, expect_new, probe, max_seen: s.max_seen_id, baseline, cookies: rec.cookies,
                     demo: s.demo ? {seed: s.seed, now: now0, speed: s.speed, request_no: s.requests} : null};
       let r;
       try { r = await serverApi("/api/scan", {method: "POST", body: JSON.stringify(body)}); }
@@ -354,7 +372,7 @@ const L = {
             posted = Math.min(posted, it.seen_at);
             if (!(S.start_ts <= posted && posted <= S.capture_end)) continue;   // captation uniquement
             row = {session_id: S.id, item_id: it.item_id, title: it.title, brand: it.brand, price: it.price, currency: it.currency,
-                   size: it.size, condition: it.condition, url: it.url, photo_url: it.photo_url, posted_at: posted,
+                   size: it.size, condition: it.condition, url: it.url, photo_url: it.photo_url, posted_at: posted, catalog_id: it.cat ?? null,
                    first_seen: it.seen_at, first_age: it.seen_at - posted, window_fav: null, window_age: null, cps: {}};
             nNew++;
           }
@@ -372,22 +390,35 @@ const L = {
       }
       const seenIds = new Set(r.items.map(i => i.item_id)), missedIds = active.filter(id => !seenIds.has(id)), missed = missedIds.length;
       // Absence « prouvée » seulement si le scan est allé au bout (pas bloqué par la limite des 10 pages).
-      if (!baseline && r.status === "ok" && !r.limited) for (const id of missedIds) { const row = rec.items[id]; if (row) { row.cps = row.cps || {}; row.cps._m = (row.cps._m || 0) + 1; } }
+      const probeOnly = r.probe && !r.probe_hit;   // sonde sans nouveau lot : pas un scan complet
+      if (!baseline && r.status === "ok" && !r.limited && !probeOnly) for (const id of missedIds) { const row = rec.items[id]; if (row) { row.cps = row.cps || {}; row.cps._m = (row.cps._m || 0) + 1; } }
       S.requests += r.requests || 0;
       for (const w of r.warnings || []) if (!S.warnings.includes(w)) S.warnings.push(w);
       if (r.cookies) rec.cookies = r.cookies;
       const now = this.clockNow(S);
+      const prevLc = S.last_cycle || {};
       S.last_cycle = {pages: r.pages, new: nNew, snaps: r.items.length, at: now, baseline, stale: r.stale || 0, missed, bands: r.bands || 1,
-                      t_first: r.t_first || S.last_cycle?.t_first};
+                      t_first: r.t_first || prevLc.t_first, probe: !!r.probe, probe_hit: !!r.probe_hit};
       if (r.status === "ok") {
-        S.cycles += 1; S.last_cycle_at = now; S.backoff_i = 0; S.api_level = "ok";
-        S.api_text = baseline ? "OK — référence prise, la captation commence" : "OK";
-        let nxt = now + (baseline ? 20 : S.interval_s + Math.random() * 6);
+        if (!probeOnly) { S.cycles += 1; S.last_cycle_at = now; }
+        S.backoff_i = 0; S.api_level = "ok";
+        S.api_text = baseline ? "OK — référence prise, la captation commence" : probeOnly ? "OK — en attente du prochain lot Vinted" : "OK";
+        let nxt = probeOnly && prevLc.full_next ? prevLc.full_next : now + (baseline ? 20 : S.interval_s + Math.random() * 6);
         // Aucun palier (5, 10, 15 min…) ne doit tomber trop loin d'un relevé : on avance le scan si besoin.
         const cpl = M.checkpoints(S.window_min), targets = [];
         for (const i of Object.values(rec.items)) for (const c of cpl) { const e = i.posted_at + c * 60 + 60; if (now < e && e < nxt) targets.push(e - 30); }
-        if (targets.length) nxt = Math.min(nxt, Math.max(now + 45, Math.min(...targets)));
-        S.next_tick_at = Math.min(nxt, S.final_end + 1);
+        if (targets.length && !(probeOnly && prevLc.full_next)) nxt = Math.min(nxt, Math.max(now + 45, Math.min(...targets)));
+        // Sonde : si un nouveau lot Vinted est attendu avant le prochain scan complet, on vérifie la page 1
+        // toutes les 15 s autour de l'heure attendue (période des lots apprise) — cf. tracker.plan_next.
+        let at = nxt, isProbe = false;
+        if (!baseline && S.calib?.length) {
+          const C = S.calib, gaps = C.slice(2).map((c, k) => c[0] - C[k + 1][0]).filter(g => g > 0).sort((a, b) => a - b);
+          const period = gaps.length >= 2 ? Math.min(300, Math.max(60, gaps[gaps.length >> 1])) : 150;
+          const expected = C[C.length - 1][0] + period, probeAt = Math.max(now + 15, expected - 5);
+          if (probeAt < nxt - 15 && now < expected + 120) { at = probeAt; isProbe = true; }
+        }
+        S.last_cycle.next_probe = isProbe; S.last_cycle.full_next = nxt;
+        S.next_tick_at = Math.min(at, S.final_end + 1);
       } else if (r.status === "stale") {
         S.api_level = "warn"; S.api_text = r.message; S.next_tick_at = now + 15;    // copie en cache : on réessaie vite
       } else if (r.status === "rate_limited") {
@@ -427,7 +458,8 @@ const L = {
       n_hot: items.filter(i => i.hot).length, n_gone: items.filter(i => i.gone).length, checkpoints: M.checkpoints(s.window_min),
       alerts: items.filter(i => (i.is_hit || i.hot) && i.in_progress).map(i => ({item_id: i.item_id, kind: i.is_hit ? "hit" : "hot",
         brand: i.brand, price: i.price, favs: i.last_fav, age_min: i.age_min, url: i.url, projected: i.projected})),
-      top_items: top, top_brands: brands.slice(0, 10)};
+      top_items: top, top_brands: brands.slice(0, 10),
+      top_cats: (s.filters.catalog_ids || []).length > 1 ? catStats(items, s.filters.catalog_names || {}, Math.max(1 / 60, (Math.min(t, s.capture_end) - s.start_ts) / 3600)) : []};
   },
   async sessions() { return [...await this.index()].sort((a, b) => b.created_at - a.created_at); },
   async detail(id) {
@@ -519,6 +551,28 @@ function brandStats(items) {
   });
   return out.sort((a, b) => (b.score - a.score) || (b.hits - a.hits) || (b.n_items - a.n_items));
 }
+function catStats(items, names = {}, hours = 1) {   // port de measure.cat_stats
+  const g = new Map();
+  for (const it of items) { const k = it.catalog_id ?? null; if (!g.has(k)) g.set(k, []); g.get(k).push(it); }
+  return [...g].map(([cat, its]) => {
+    const favs = its.filter(i => i.window_fav != null && !i.partial).map(i => i.window_fav).sort((a, b) => a - b);
+    const hits = its.filter(i => i.is_hit).length, gone = its.filter(i => i.gone).length, n = its.length, med = median(favs);
+    return {catalog_id: cat, name: names[cat] || (cat == null ? "Toutes" : `Catégorie ${cat}`), n_items: n, per_hour: r1(n / Math.max(hours, 1 / 60), 1),
+      hits, hit_rate: n ? r1(100 * hits / n, 1) : 0, fav_median: med, fav_p90: favs.length ? favs[Math.floor(favs.length * 0.9)] : 0, gone,
+      hot: its.filter(i => i.hot).length, score: r1(med * Math.min(n, 5) / 5 + M.HIT_WEIGHT * hits + M.GONE_WEIGHT * gone, 2)};
+  }).sort((a, b) => (b.hit_rate - a.hit_rate) || (b.fav_median - a.fav_median));
+}
+const CAT_COLS = [
+  {key: "name", label: "Catégorie", fmt: r => `<b title="${esc(r.name)}">${esc(shortCat(r.name))}</b>`},
+  {key: "hit_rate", label: "% hits", num: true, fmt: r => `<span class="score">${nf(r.hit_rate, 1)} %</span>`},
+  {key: "fav_median", label: "Fav. méd.", num: true, fmt: r => nf(r.fav_median, 1)},
+  {key: "fav_p90", label: "Fav. top 10 %", num: true},
+  {key: "hits", label: "Hits", num: true},
+  {key: "gone", label: "Vendues ?", num: true, fmt: r => r.gone ? `<b style="color:var(--ok)">${r.gone}</b>` : "0"},
+  {key: "hot", label: "🔥", num: true, hideIfZero: true},
+  {key: "n_items", label: "Annonces", num: true},
+  {key: "per_hour", label: "/ heure", num: true, fmt: r => nf(r.per_hour, 0)},
+];
 function sessionSummary(items, s) {   // indice de demande de la niche (comparaison entre veilles)
   const favs = items.filter(i => i.window_fav != null && !i.partial).map(i => i.window_fav).sort((a, b) => a - b), n = items.length;
   const hits = items.filter(i => i.is_hit).length;
@@ -530,7 +584,10 @@ function sessionSummary(items, s) {   // indice de demande de la niche (comparai
 function filtersLabel(f) {
   const fmt = x => Number.isInteger(x) ? String(x) : x.toFixed(2).replace(".", ","), p = [];
   if (f.search_text) p.push(`« ${f.search_text} »`);
-  if (f.catalog_ids?.length) p.push("cat. " + f.catalog_ids.join(","));
+  if (f.catalog_ids?.length) {
+    const labels = f.catalog_ids.map(c => (f.catalog_names || {})[c] ? shortCat(f.catalog_names[c]) : `cat. ${c}`);
+    p.push(labels.slice(0, 4).join(", ") + (labels.length > 4 ? ` +${labels.length - 4}` : ""));
+  }
   if (f.price_from != null || f.price_to != null) p.push(`${f.price_from != null ? fmt(f.price_from) : "0"}–${f.price_to != null ? fmt(f.price_to) : "∞"} €`);
   for (const [k, lab] of [["brand_ids", "marques"], ["size_ids", "tailles"], ["status_ids", "états"]]) if (f[k]?.length) p.push(`${f[k].length} ${lab}`);
   return p.join(" · ") || "Tout Vinted";
@@ -553,8 +610,9 @@ async function exportLocal(id, kind) {
       `veille_${id}_marques.csv`);
   } else {
     const cps = M.checkpoints(s.window_min);
-    downloadCsv([["id", "titre", "marque", "prix", "devise", "taille", "état", "mise en ligne (estimée)", ...cps.map(c => `favoris à ${c} min`), "favoris / min", "mesure", "hit", "lien"],
-      ...d.items.map(i => [i.item_id, i.title, i.brand, csvNum(i.price), i.currency, i.size, i.condition, csvDate(i.posted_at), ...cps.map(c => csvNum(i.cp_values?.[c])),
+    const names = s.filters.catalog_names || {};
+    downloadCsv([["id", "titre", "marque", "catégorie", "prix", "devise", "taille", "état", "mise en ligne (estimée)", ...cps.map(c => `favoris à ${c} min`), "favoris / min", "mesure", "hit", "lien"],
+      ...d.items.map(i => [i.item_id, i.title, i.brand, names[i.catalog_id] || "", csvNum(i.price), i.currency, i.size, i.condition, csvDate(i.posted_at), ...cps.map(c => csvNum(i.cp_values?.[c])),
         csvNum(i.favs_per_min), !i.measured ? "non mesurée" : i.gone ? "disparue (vendue ?)" : i.partial ? "partielle" : i.in_progress ? "en cours" : "complète",
         i.is_hit ? "oui" : "non", i.url])], `veille_${id}_annonces.csv`);
   }
@@ -656,6 +714,53 @@ function itemCols(win, cps, live) {
   ];
 }
 
+/* ---------- sélecteur de catégories (arbre complet Vinted) ---------- */
+let CATTREE = null, CATSEL = new Map(), CATPATHS = [];
+async function loadCats() {
+  if (CATTREE) return CATTREE;
+  let d = await api("/api/categories").catch(() => null);
+  if (!d?.tree?.length) d = await fetch("/categories.json").then(r => r.json()).catch(() => ({tree: []}));
+  CATTREE = d.tree || []; CATPATHS = [];
+  const walk = (ns, path) => ns.forEach(n => { const p = [...path, n.title]; CATPATHS.push({id: n.id, path: p.join(" › "), title: n.title, leaf: !n.children.length}); walk(n.children, p); });
+  walk(CATTREE, []);
+  return CATTREE;
+}
+// « Femmes › Chaussures › Baskets » -> « Baskets (Femmes) » : court mais sans ambiguïté.
+const shortCat = p => { const a = String(p || "").split(" › "); return a.length > 1 ? `${a[a.length - 1]} (${a[0]})` : a[0]; };
+const norm = x => x.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
+function catPath(id) { return CATPATHS.find(c => c.id === id)?.path || `Catégorie ${id}`; }
+function drawCatSel() {
+  $("#catsel").innerHTML = [...CATSEL].map(([id, p]) => `<span class="chip">${esc(shortCat(p))} <a href="#" data-unsel="${id}" title="Retirer" style="margin-left:4px">✕</a></span>`).join("")
+    || `<span class="chip gray">Aucune catégorie choisie</span>`;
+  $("#catsel").querySelectorAll("[data-unsel]").forEach(a => a.onclick = e => { e.preventDefault(); CATSEL.delete(+a.dataset.unsel); drawCatSel(); drawCatTree(); });
+}
+function catRow(n, path, depth) {
+  const p = [...path, n.title].join(" › "), has = n.children.length;
+  return `<div class="catrow" style="padding-left:${8 + depth * 18}px">
+    ${has ? `<button type="button" class="tw" data-open="${n.id}">${OPEN.has(n.id) ? "▾" : "▸"}</button>` : `<span class="tw"></span>`}
+    <label><input type="checkbox" data-cat="${n.id}" data-path="${esc(p)}" ${CATSEL.has(n.id) ? "checked" : ""}> ${esc(n.title)}${has ? ` <span class="muted small">(${n.children.length})</span>` : ""}</label></div>`
+    + (has && OPEN.has(n.id) ? n.children.map(c => catRow(c, [...path, n.title], depth + 1)).join("") : "");
+}
+const OPEN = new Set();
+function drawCatTree() {
+  const q = norm($("#catq")?.value.trim() || ""), box = $("#cattree");
+  if (!box) return;
+  if (!CATTREE?.length) { box.innerHTML = `<div class="muted small" style="padding:8px">Catégories indisponibles : utilise l'URL ou l'ID.</div>`; return; }
+  if (q.length >= 2) {
+    const hits = CATPATHS.filter(c => norm(c.path).includes(q)).sort((a, b) => (norm(a.title).startsWith(q) ? 0 : 1) - (norm(b.title).startsWith(q) ? 0 : 1) || a.path.length - b.path.length).slice(0, 80);
+    box.innerHTML = hits.length ? hits.map(c => `<div class="catrow"><label><input type="checkbox" data-cat="${c.id}" data-path="${esc(c.path)}" ${CATSEL.has(c.id) ? "checked" : ""}> ${esc(c.path)}</label></div>`).join("")
+      : `<div class="muted small" style="padding:8px">Aucune catégorie ne correspond.</div>`;
+  } else box.innerHTML = CATTREE.map(n => catRow(n, [], 0)).join("");
+  box.querySelectorAll("[data-open]").forEach(b => b.onclick = () => { const id = +b.dataset.open; OPEN.has(id) ? OPEN.delete(id) : OPEN.add(id); drawCatTree(); });
+  box.querySelectorAll("[data-cat]").forEach(cb => cb.onchange = () => { const id = +cb.dataset.cat; cb.checked ? CATSEL.set(id, cb.dataset.path) : CATSEL.delete(id); drawCatSel(); });
+}
+async function initCatPicker() {
+  drawCatSel();
+  await loadCats();
+  drawCatTree();
+  let t; $("#catq")?.addEventListener("input", () => { clearTimeout(t); t = setTimeout(drawCatTree, 150); });
+}
+
 /* ---------- écran Veille ---------- */
 let lastState = null;
 
@@ -704,13 +809,21 @@ function renderForm(s) {
   ${last ? `<div class="notice" style="margin-bottom:16px"><span>Dernière veille <b>#${last.id}</b> · ${esc(last.filters_label)} · <span class="st ${last.status}">${STATUS[last.status] || last.status}</span></span><span class="spacer"></span><a class="btn sm" href="#session/${last.id}">Voir les résultats</a></div>` : ""}
   <form class="card" id="f" autocomplete="off">
     <h2>Nouvelle veille</h2>
+    <label for="catq">Catégories Vinted <span class="muted" style="font-weight:500">(une ou plusieurs)</span></label>
+    <div class="catpick">
+      <div class="chips" id="catsel"></div>
+      <input type="text" id="catq" placeholder="Rechercher : sweat, baskets, robe, jean…" autocomplete="off">
+      <div class="cattree" id="cattree"><div class="muted small" style="padding:8px">Chargement des catégories…</div></div>
+    </div>
+    <div class="hint">Coche une catégorie parente pour inclure toutes ses sous-catégories. Chaque catégorie est surveillée séparément puis comparée.</div>
+    <div class="or">et / ou</div>
     <label for="url">URL de recherche Vinted</label>
     <input type="url" id="url" placeholder="https://www.vinted.fr/catalog?catalog[]=79&price_from=10&price_to=40" value="${esc(f.url || "")}">
     <div class="hint">Fais ta recherche filtrée sur vinted.fr puis colle l'URL de la barre d'adresse.</div>
     <div class="chips" id="parsed"></div>
     <div class="or">ou en manuel</div>
     <div class="fields">
-      <div><label for="cat">ID de catégorie</label><input type="text" inputmode="numeric" id="cat" placeholder="ex : 79" value="${esc(f.catalog_id || "")}"></div>
+      <div><label for="cat">ID(s) de catégorie</label><input type="text" inputmode="numeric" id="cat" placeholder="ex : 79, 1206" value="${esc(f.catalog_id || "")}"></div>
       <div><label for="pmin">Prix min (€)</label><input type="number" id="pmin" min="0" step="1" value="${esc(f.price_min ?? "")}"></div>
       <div><label for="pmax">Prix max (€)</label><input type="number" id="pmax" min="0" step="1" value="${esc(f.price_max ?? "")}"></div>
     </div>
@@ -738,6 +851,8 @@ function renderForm(s) {
     score = médiane des favoris × min(annonces, 5)/5 + 2 × hits.
   </div>`;
   const form = $("#f");
+  CATSEL = new Map(Object.entries(f.catalog_names || {}).filter(([k]) => (f.catalog_ids || []).includes(+k)).map(([k, v]) => [+k, v]));
+  initCatPicker();
   let t;
   const parse = async () => {
     if (!$("#url")) return;   // on a quitté le formulaire entre-temps
@@ -771,6 +886,7 @@ function renderForm(s) {
     const num = id => $(id).value === "" ? null : Number($(id).value);
     const body = {
       url: $("#url").value.trim(), catalog_id: $("#cat").value.trim(),
+      catalog_ids: [...CATSEL.keys()], catalog_names: Object.fromEntries(CATSEL),
       price_min: num("#pmin"), price_max: num("#pmax"),
       duration_min: num("#dur") ?? 60, window_min: num("#win") ?? 15,
       threshold: num("#thr") ?? 20, interval_s: Math.max(45, num("#int") ?? 60), demo: $("#demo").checked,
@@ -850,7 +966,7 @@ function renderLive(s, token) {
   const winFill = s.phase === "capture" ? 0 : s.phase_progress;
   const phaseLabel = s.phase === "capture" ? "Captation des nouvelles annonces" : s.phase === "window" ? "Fenêtre de fin — plus de nouvelles annonces, on finit les mesures" : "Finalisation";
   const speed = s.speed || 1;
-  const nxt = s.next_cycle_in != null ? `Prochain scan dans ${dur(s.next_cycle_in / speed)}` : "Scan en cours…";
+  const nxt = s.next_cycle_in != null ? `${s.last_cycle?.next_probe ? "Sonde (nouveau lot attendu)" : "Prochain scan"} dans ${dur(s.next_cycle_in / speed)}` : "Scan en cours…";
   const lc = s.last_cycle || {};
   $("#app").innerHTML = `
   <div class="card">
@@ -883,12 +999,14 @@ function renderLive(s, token) {
   <div class="grid g2">
     <div class="card"><h2>Top demande</h2><div class="hint" style="margin:-8px 0 12px">Annonces jeunes : favoris actuels et projection à ${win} min. Annonces terminées : favoris à ${win} min.</div>
       <div class="items">${s.top_items.length ? s.top_items.map((i, n) => itemCard(i, n + 1, win)).join("") : `<div class="empty">En attente des premières annonces postées après le lancement…</div>`}</div></div>
-    <div class="card"><h2>Top marques</h2><div id="tb"></div></div>
+    <div class="card"><h2>Top marques</h2><div id="tb"></div>
+      ${s.top_cats?.length ? `<h2 style="margin-top:22px">Par catégorie</h2><div id="tc"></div>` : ""}</div>
   </div>`;
   const drawBrands = () => {
     const cols = BRAND_COLS.filter(c => ["rank", "brand", "score", "n_items", "hits", "hot", "fav_median", "price_mean"].includes(c.key));
     $("#tb").innerHTML = table("live-brands", cols, brandRows(s.top_brands), "score", brandRowClass);
     bindTables($("#tb"), drawBrands);
+    if (s.top_cats?.length) { $("#tc").innerHTML = table("live-cats", CAT_COLS.filter(c => ["name", "hit_rate", "fav_median", "hits", "n_items"].includes(c.key)), s.top_cats, "hit_rate"); bindTables($("#tc"), drawBrands); }
   };
   drawBrands();
   $("#alerts").onclick = async () => { await ALERTS.toggle(s); renderLive(s, token); };
@@ -900,7 +1018,7 @@ function renderLive(s, token) {
   };
   kick(); keepAwake(true);
   if (s.demo && !demoKick) demoKick = setInterval(() => { if (lastState?.running) kick(); else { clearInterval(demoKick); demoKick = null; } }, 200);
-  pollTimer = setTimeout(() => { if (token === renderToken) viewWatch(token); }, s.demo ? 1000 : 5000);
+  pollTimer = setTimeout(() => { if (token === renderToken) viewWatch(token); }, s.demo ? 1000 : 2000);   // affichage quasi temps réel
 }
 
 /* ---------- résultats d'une session ---------- */
@@ -942,6 +1060,8 @@ async function viewSession(id, token) {
     ${partial ? `<div class="warnbox">${partial} mesure(s) partielle(s) : le dernier relevé a été pris avant la fin des ${win} min (veille arrêtée, pause API…). Les favoris réels sont probablement plus élevés.</div>` : ""}
     ${(s.warnings || []).map(w => `<div class="warnbox">⚠ ${esc(w)}</div>`).join("")}
   </div>
+  ${(f.catalog_ids || []).length > 1 ? `<div class="card"><h2>Comparaison des catégories</h2><div id="tcat"></div>
+    <div class="hint">Classées par % de hits puis favoris médians à ${win} min : les catégories du haut sont les plus demandées.</div></div>` : ""}
   <div class="card"><h2>Classement des marques</h2><div id="tb"></div>
     <div class="hint">Vinted ne publie plus l'heure de mise en ligne : elle est estimée d'après le numéro de l'annonce et les mises à jour de l'index Vinted (précision ≈ ±30 s).
       « Vendue ? » = annonce disparue des résultats avant la fin de sa fenêtre.
@@ -950,7 +1070,11 @@ async function viewSession(id, token) {
   <div class="card"><h2>Annonces</h2><div id="ti"></div></div>`;
   const draw = () => {
     $("#tb").innerHTML = table("brands", BRAND_COLS, brandRows(d.brands), "score", brandRowClass);
-    $("#ti").innerHTML = table("items", itemCols(win, M.checkpoints(win), d.live), d.items, "rank_value", i => i.is_hit ? "hit" : "");
+    const multi = (f.catalog_ids || []).length > 1, names = f.catalog_names || {};
+    const icols = itemCols(win, M.checkpoints(win), d.live);
+    if (multi) icols.splice(2, 0, {key: "catalog_id", label: "Catégorie", sort: i => names[i.catalog_id] || "", fmt: i => esc(shortCat(names[i.catalog_id] || "–"))});
+    $("#ti").innerHTML = table("items", icols, d.items, "rank_value", i => i.is_hit ? "hit" : "");
+    if (multi) $("#tcat").innerHTML = table("cats", CAT_COLS, catStats(d.items, names, Math.max(1 / 60, s.duration_min / 60)), "hit_rate");
     bindTables($("#app"), draw);
   };
   draw();

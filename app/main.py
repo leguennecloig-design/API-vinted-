@@ -112,6 +112,8 @@ async def password_guard(request: Request, call_next):
 class StartBody(BaseModel):
     url: str = ""
     catalog_id: str = ""
+    catalog_ids: list[int] = []          # catégories choisies dans le sélecteur
+    catalog_names: dict[str, str] = {}   # id -> « Hommes › Vêtements › Sweats et pulls »
     price_min: float | None = None
     price_max: float | None = None
     duration_min: int = Field(60, ge=1, le=24 * 60)
@@ -179,8 +181,22 @@ def build_filters(b: StartBody) -> dict:
         f = vinted.parse_search_url("")
     # Les champs manuels complètent / remplacent l'URL.
     ids = [int(x) for x in b.catalog_id.replace(";", ",").split(",") if x.strip().isdigit()]
+    for c in b.catalog_ids:
+        if c not in ids:
+            ids.append(int(c))
     if ids:
         f["catalog_ids"] = ids
+    if f["catalog_ids"]:
+        names = dict(b.catalog_names)
+        missing = [c for c in f["catalog_ids"] if str(c) not in names]
+        if missing:
+            try:
+                from . import categories as cat
+                t = cat.titles(cat.get_tree().get("tree", []))
+                names.update({str(c): t[c] for c in missing if c in t})
+            except Exception:
+                pass
+        f["catalog_names"] = {str(c): names[str(c)] for c in f["catalog_ids"] if str(c) in names}
     if b.price_min is not None:
         f["price_from"] = b.price_min
     if b.price_max is not None:
@@ -202,10 +218,11 @@ class DemoParams(BaseModel):
 class ScanBody(BaseModel):
     filters: dict
     active_ids: list[int] = []      # (ancien format) annonces en cours de mesure
-    active: list[list] = []         # [[id, prix], ...] annonces en cours de mesure, à revoir pendant ce scan
+    active: list[list] = []         # [[id, prix, catégorie], ...] annonces en cours de mesure
+    probe: bool = False             # sonde : page 1 seulement, scan complet si un nouveau lot apparaît
     max_seen: int | None = None     # plus haut ID déjà vu (détection des copies en cache)
     baseline: bool = False          # scan de référence (1 page) au lancement
-    depth: int | None = None        # profondeur à parcourir (voir tracker.needed_depth)
+    depth: int | dict | None = None  # profondeur à parcourir, par catégorie (voir tracker.needed_depth)
     expect_new: bool = False        # un nouveau lot d'index est attendu : revérifier la page 1 si besoin
     cookies: dict | None = None
     demo: DemoParams | None = None
@@ -239,10 +256,13 @@ def scan(body: ScanBody):
         except Exception as e:
             return {"status": "error", "message": f"{type(e).__name__}: {e}"}
     try:
-        active = {int(a[0]): (a[1] if len(a) > 1 else None) for a in body.active} or \
-            {int(i): None for i in body.active_ids}
+        active = {int(a[0]): (a[1] if len(a) > 1 else None, a[2] if len(a) > 2 else None) for a in body.active} or \
+            {int(i): (None, None) for i in body.active_ids}
+        depth = {(int(k) if str(k).lstrip("-").isdigit() else None): v for k, v in body.depth.items()} \
+            if isinstance(body.depth, dict) else body.depth
         tracker.scan_all(client, body.filters, active, body.max_seen, now_fn, sleep_fn, out, meta,
-                         warnings.append, baseline=body.baseline, depth=body.depth, expect_new=body.expect_new)
+                         warnings.append, baseline=body.baseline, depth=depth, expect_new=body.expect_new,
+                         probe=body.probe)
     except vinted.RateLimited as e:
         res = {"status": "rate_limited", "http": e.status}
     except tracker.StaleResults as e:
@@ -250,9 +270,10 @@ def scan(body: ScanBody):
     except vinted.ApiError as e:
         res = {"status": "error", "message": str(e)}
     keep = ("item_id", "title", "brand", "price", "currency", "size", "condition", "url", "photo_url",
-            "posted_at", "favs", "views", "seen_at", "promoted")
+            "posted_at", "favs", "views", "seen_at", "promoted", "cat")
     res.update(t_first=meta.get("t_first"), max_first=meta.get("max_first"), stale=meta.get("stale", 0),
-               bands=meta.get("bands", 1), limited=bool(meta.get("limited")))
+               bands=meta.get("bands", 1), limited=bool(meta.get("limited")),
+               probe=bool(meta.get("probe")), probe_hit=bool(meta.get("probe_hit")))
     res.update(items=[{k: it[k] for k in keep} for it in out], pages=meta["pages"], requests=meta["requests"],
                warnings=warnings, now=now_fn(),
                cookies=(client.export_cookies() if not client.demo and client.warmed else None))
@@ -357,12 +378,13 @@ def _ts(t: float | None) -> str:
 def export_items(sid: int):
     s, items, _, _ = _session_data(sid)
     cps = measure.checkpoints(s["window_min"])
-    rows = [["id", "titre", "marque", "prix", "devise", "taille", "état", "mise en ligne (estimée)",
+    names = s["filters"].get("catalog_names") or {}
+    rows = [["id", "titre", "marque", "catégorie", "prix", "devise", "taille", "état", "mise en ligne (estimée)",
              *[f"favoris à {c} min" for c in cps], "favoris / min", "mesure", "hit", "lien"]]
     for i in sorted(items, key=lambda i: -(i["rank_value"] or 0)):
         mesure = "non mesurée" if not i["measured"] else "disparue (vendue ?)" if i.get("gone") else \
             "partielle" if i["partial"] else "en cours" if i["in_progress"] else "complète"
-        rows.append([i["item_id"], i["title"], i["brand"], _num(i["price"]), i["currency"], i["size"],
+        rows.append([i["item_id"], i["title"], i["brand"], names.get(str(i.get("catalog_id")), ""), _num(i["price"]), i["currency"], i["size"],
                      i["condition"], _ts(i["posted_at"]), *[_num(i["cp_values"].get(str(c))) for c in cps],
                      _num(i["favs_per_min"]), mesure, "oui" if i["is_hit"] else "non", i["url"]])
     return _csv_response(rows, f"veille_{sid}_annonces.csv")
