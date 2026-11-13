@@ -7,7 +7,9 @@ import re
 from urllib.parse import parse_qs, urlparse
 
 BASE = "https://www.vinted.fr"
-API = BASE + "/api/v2/catalog/items"
+# Depuis septembre 2026, le catalogue est servi par api.vinted.fr/svc-catalogue (l'ancien
+# www.vinted.fr/api/v2/catalog/items répond 404). Jeton = cookie access_token_web du site www.
+API = "https://api.vinted.fr/svc-catalogue/items"
 PER_PAGE = 96
 
 
@@ -86,12 +88,14 @@ def _fmt(x: float) -> str:
 
 
 def api_params(f: dict, page: int) -> dict:
+    """Paramètres de svc-catalogue : filtres renommés en attribute_ids[...], aucun filtre vide (sinon 400)."""
     p = {"page": page, "per_page": PER_PAGE, "order": "newest_first", "currency": "EUR"}
     if f.get("search_text"):
         p["search_text"] = f["search_text"]
-    for key in ("catalog_ids", "brand_ids", "size_ids", "status_ids"):
+    for key, attr in (("catalog_ids", "catalog"), ("brand_ids", "brand"), ("size_ids", "size"),
+                      ("status_ids", "status")):
         if f.get(key):
-            p[key] = ",".join(map(str, f[key]))
+            p[f"attribute_ids[{attr}]"] = ",".join(map(str, f[key]))
     if f.get("price_from") is not None:
         p["price_from"] = f["price_from"]
     if f.get("price_to") is not None:
@@ -169,38 +173,58 @@ class VintedClient:
             return dict(self.session.cookies)
 
     def warmup(self):
-        """Appelle la page d'accueil pour récupérer les cookies (access_token_web…)."""
+        """Visite le site www pour obtenir les cookies access_token_web (jeton API) et anon_id."""
         try:
             r = self.session.get(BASE + "/", timeout=20)
         except Exception as e:
             raise ApiError(f"Erreur réseau (page d'accueil) : {e}") from e
         if r.status_code in (403, 429):
             raise RateLimited(r.status_code)
+        if not self._cookie("access_token_web"):
+            raise ApiError("Vinted n'a pas fourni de jeton (cookie access_token_web absent)")
         self.warmed = True
 
+    def _cookie(self, name: str) -> str | None:
+        try:
+            return self.session.cookies.get(name, domain=".vinted.fr") or self.session.cookies.get(name)
+        except Exception:
+            for c in self.session.cookies.jar:
+                if c.name == name:
+                    return c.value
+        return None
+
+    def _headers(self) -> dict:
+        h = {"Accept": "application/json", "Origin": BASE, "Referer": BASE + "/", "Locale": "fr"}
+        tok, anon = self._cookie("access_token_web"), self._cookie("anon_id")
+        if tok:
+            h["Authorization"] = f"Bearer {tok}"
+        if anon:
+            h["x-anon-id"] = anon
+        return h
+
     def fetch_page(self, filters: dict, page: int) -> list[dict]:
-        if not self.warmed:
+        if not self.warmed or not self._cookie("access_token_web"):
             self.warmup()
         for attempt in (1, 2):
             try:
-                r = self.session.get(API, params=api_params(filters, page), timeout=20)
+                r = self.session.get(API, params=api_params(filters, page), headers=self._headers(), timeout=20)
             except Exception as e:  # réseau
                 raise ApiError(f"Erreur réseau : {e}") from e
-            if r.status_code == 401 and attempt == 1:
-                self.session.cookies.clear()
+            if r.status_code in (401, 403) and attempt == 1:
+                self.session.cookies.clear()  # jeton expiré : on en reprend un
                 self.warmup()
                 continue
             if r.status_code in (403, 429):
                 raise RateLimited(r.status_code)
             if r.status_code != 200:
-                snippet = " ".join((r.text or "")[:160].split())
-                raise ApiError(f"HTTP {r.status_code} sur {str(r.url)[:120]} — {snippet}")
+                snippet = " ".join((r.text or "")[:200].split())
+                raise ApiError(f"HTTP {r.status_code} sur {str(r.url)[:140]} — {snippet}")
             try:
                 data = r.json()
             except Exception as e:
                 raise ApiError("Réponse non JSON") from e
             return data.get("items") or []
-        raise ApiError("401 persistant malgré le rafraîchissement des cookies")
+        raise ApiError("Jeton refusé malgré le rafraîchissement des cookies")
 
 
 # ---------------------------------------------------------------- mode démo

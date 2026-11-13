@@ -187,6 +187,7 @@ class ScanBody(BaseModel):
     window_min: int = Field(ge=1)
     cookies: dict | None = None
     demo: DemoParams | None = None
+    debug: bool = False
 
 
 @app.post("/api/scan")
@@ -204,6 +205,14 @@ def scan(body: ScanBody):
     meta = {"requests": 0, "pages": 0}
     warnings: list[str] = []
     res = {"status": "ok"}
+    if body.debug and not body.demo:  # diagnostic : forme brute d'une annonce (sans le vendeur)
+        try:
+            raw = client.fetch_page(body.filters, 1)
+            sample = {k: v for k, v in (raw[0] if raw else {}).items() if k not in ("user", "seller")}
+            return {"status": "ok", "count": len(raw), "sample": sample,
+                    "ids": [r.get("id") for r in raw[:30]]}
+        except Exception as e:
+            return {"status": "error", "message": f"{type(e).__name__}: {e}"}
     try:
         tracker.scan_pages(client, body.filters, body.start_ts, body.window_min * 60 + 120, now_fn, sleep_fn,
                            out, meta, warnings.append)
