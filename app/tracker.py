@@ -270,7 +270,10 @@ def classify(seen: list[dict], rows: dict, s: dict, calib: list) -> int:
             if iid <= floor:
                 continue  # déjà en ligne avant la veille (ou ancienne annonce remontée)
             posted = it["posted_at"] or estimate_posted(iid, calib) or now
-            posted = min(posted, now)
+            # Une annonce n'a pas pu être visible avant le lot d'index qui précède celui où elle
+            # apparaît. Cas typique : un brouillon (ID attribué à sa création) publié bien plus tard.
+            lower = calib[-2][0] if len(calib) >= 2 else (calib[0][0] if calib else now)
+            posted = min(max(posted, lower), now)
             if not (s["start_ts"] <= posted <= s["capture_end"]):
                 continue  # postée hors captation
             row = {c: it.get(c) for c in ("title", "brand", "price", "currency", "size",

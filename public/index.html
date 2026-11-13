@@ -328,7 +328,9 @@ const L = {
           let row = rec.items[it.item_id];
           if (!row) {
             if (it.item_id <= (S.id_floor || 0)) continue;                // déjà en ligne avant la veille
-            const posted = Math.min(it.posted_at ?? estimate(it.item_id) ?? it.seen_at, it.seen_at);
+            // Pas visible avant le lot d'index précédant sa 1re apparition (ex. brouillon publié tard).
+            const lower = S.calib.length >= 2 ? S.calib[S.calib.length - 2][0] : (S.calib[0]?.[0] ?? it.seen_at);
+            const posted = Math.min(Math.max(it.posted_at ?? estimate(it.item_id) ?? it.seen_at, lower), it.seen_at);
             if (!(S.start_ts <= posted && posted <= S.capture_end)) continue;   // captation uniquement
             row = {session_id: S.id, item_id: it.item_id, title: it.title, brand: it.brand, price: it.price, currency: it.currency,
                    size: it.size, condition: it.condition, url: it.url, photo_url: it.photo_url, posted_at: posted,
