@@ -318,6 +318,7 @@ const L = {
         if (r.max_first) { S.id_floor = Math.max(...ids); S.max_seen_id = S.id_floor; S.calib = [[r.t_first, S.id_floor]]; }
       } else {
         // Calibration ID -> heure : (heure du scan, plus haut ID vu). Voir estimate_posted (app/tracker.py).
+        if (!S.calib?.length) S.calib = [[S.last_cycle_at || S.start_ts, S.id_floor]];   // veille d'une version antérieure
         // Nouveau lot d'index Vinted : publié entre le scan précédent et celui-ci -> daté au milieu.
         const lastC = S.calib[S.calib.length - 1];
         if (r.max_first && r.max_first > lastC[1]) S.calib.push([(Math.max(S.last_cycle?.t_first || lastC[0], lastC[0]) + r.t_first) / 2, r.max_first]);

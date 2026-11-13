@@ -269,7 +269,7 @@ DEMO_RATE = 8.0     # annonces / minute simulée
 
 
 class DemoClient:
-    """Imite /api/v2/catalog/items. Flux déterministe (même graine = mêmes annonces) :
+    """Imite api.vinted.fr/svc-catalogue/items. Flux déterministe (même graine = mêmes annonces) :
     rien à garder en mémoire entre deux scans, compatible serverless."""
 
     demo = True

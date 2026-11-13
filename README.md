@@ -22,6 +22,7 @@ le demande (réseau **privé**), ou relance `start.bat` après avoir accepté.
 ## Mise en ligne sur Vercel
 
 Importe ce dépôt dans Vercel (*Add New › Project*), sans aucun réglage : ça marche directement.
+Les fonctions tournent à Paris (`cdg1`, voir `vercel.json`). Adresse actuelle : <https://apivinted.vercel.app>.
 
 ### Mode navigateur (par défaut, rien à configurer)
 Sans base de données, Vercel ne sert qu'à interroger Vinted (`/api/scan`, sans état). Le suivi des

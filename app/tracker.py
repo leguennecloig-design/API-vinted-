@@ -303,6 +303,8 @@ def apply_scan(s: dict, rows: dict, seen: list[dict], meta: dict, calib: list) -
             floor = max(ids)
             upd.update(id_floor=floor, max_seen_id=floor, calib=[[meta["t_first"], floor]])
         return 0, upd
+    if not calib:  # veille démarrée sur une version antérieure : calibration à partir du plancher
+        calib = [[s.get("last_cycle_at") or s["start_ts"], s["id_floor"]]]
     if meta.get("max_first") and meta["max_first"] > calib[-1][1]:
         # Nouveau lot d'index : il a été publié entre le scan précédent (qui ne le voyait pas) et
         # celui-ci. On le date au milieu, ce qui supprime le retard moyen d'une demi-période de scan.
