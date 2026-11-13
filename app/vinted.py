@@ -329,30 +329,37 @@ class DemoClient:
         }
 
     def fetch_page(self, filters: dict, page: int, extra: dict | None = None) -> list[dict]:
-        """Reproduit les défauts mesurés sur la vraie API : copies en cache (15 % des réponses ont
-        45 s de retard) et quelques anciennes annonces « remontées » intercalées dans les pages."""
+        """Reproduit le comportement mesuré sur la vraie API (nov. 2026) :
+        - index de recherche mis à jour par lots toutes les 2 min (les favoris, eux, sont en temps réel) ;
+        - 15 % des réponses servies depuis la copie du lot précédent ;
+        - annonces vendues (≈ 5 % dans les 30 min) qui disparaissent pour de bon ;
+        - quelques anciennes annonces « remontées » intercalées."""
         self.request_no += 1
         if self.request_no == 25:  # un 429 simulé, pour tester l'affichage du backoff
             raise RateLimited(429)
         rng = random.Random(f"{self.seed}:req:{self.request_no}")
-        as_of = self.now - (45 if rng.random() < 0.15 else 0)
+        phase = self.seed % 120
+        cut = math.floor((self.now - phase) / 120) * 120 + phase  # dernier lot indexé
+        if rng.random() < 0.15:
+            cut -= 120
+
+        def available(i: dict) -> bool:
+            sold = random.Random(f"{self.seed}:sold:{i['id']}")
+            return not (sold.random() < 0.05 and self.now > i["ts"] + sold.uniform(60, 1800))
+
         need = page * PER_PAGE
         found: list[dict] = []
-        b = int(as_of // 60)
+        b = int(cut // 60)
         for _ in range(240):
-            found += [i for i in self._bucket(b) if i["ts"] <= as_of]
+            found += [i for i in self._bucket(b) if i["ts"] <= cut and available(i)]
             if len(found) >= need:
                 break
             b -= 1
         chunk = found[(page - 1) * PER_PAGE: need]
         for k in range(2):  # annonces anciennes remontées (ID très bas)
             if chunk:
-                old = dict(chunk[0], id=int(as_of - 86400 * rng.randint(2, 300)) * 10 + 9,
-                           ts=as_of - 86400 * 2, title="Ancienne annonce remontée")
+                old = dict(chunk[0], id=int(cut - 86400 * rng.randint(2, 300)) * 10 + 9,
+                           ts=cut - 86400 * 2, title="Ancienne annonce remontée")
                 chunk.insert(rng.randrange(len(chunk)), old)
                 chunk.pop()
-        saved, self.now = self.now, as_of
-        try:
-            return [self._raw(i) for i in chunk]
-        finally:
-            self.now = saved
+        return [self._raw(i) for i in chunk]  # favoris calculés à l'instant présent

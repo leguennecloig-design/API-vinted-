@@ -198,7 +198,9 @@ def scan_pages(client, filters: dict, active_ids: set[int], max_seen: int | None
                 continue
             seen.add(it["item_id"])
             out.append({**it, "seen_at": now})
-        if len(raw) < vinted.PER_PAGE or not fresh_ids:
+        # Dernière page = nettement moins de 96 résultats. Une page à 94-95 est normale : Vinted retire
+        # de sa copie en cache les annonces vendues entre-temps.
+        if len(raw) < vinted.PER_PAGE * 0.8 or not fresh_ids:
             return
         fresh_ids.sort()
         remaining = active_ids - seen
@@ -241,14 +243,15 @@ def active_ids(items, now: float, window_s: float) -> set[int]:
 def estimate_posted(item_id: int, calib: list) -> float | None:
     """Heure de mise en ligne estimée à partir des IDs (croissants dans le temps).
 
-    `calib` = [(heure du scan, plus haut ID vu à ce scan), ...] par ordre chronologique. L'annonce a
-    été mise en ligne entre le dernier scan qui ne la « couvrait » pas encore et le premier qui la
-    couvre : on prend le milieu (précision ± intervalle / 2). Une annonce qui n'apparaît qu'en retard
-    garde donc une date juste.
+    `calib` = [(heure du scan, plus haut ID vu à ce scan), ...] par ordre chronologique. Vinted met à
+    jour son index de recherche par lots (~toutes les 2 min) et numérote les annonces dans l'ordre de mise
+    en ligne : entre deux points de calibration, on interpole donc linéairement selon l'ID. Une annonce
+    qui n'apparaît qu'en retard garde une date juste.
     """
     for k in range(1, len(calib)):
-        if item_id <= calib[k][1]:
-            return (calib[k - 1][0] + calib[k][0]) / 2
+        (t0, i0), (t1, i1) = calib[k - 1], calib[k]
+        if item_id <= i1:
+            return t0 + (t1 - t0) * (item_id - i0) / max(1, i1 - i0)
     return None
 
 
@@ -298,7 +301,10 @@ def apply_scan(s: dict, rows: dict, seen: list[dict], meta: dict, calib: list) -
             upd.update(id_floor=floor, max_seen_id=floor, calib=[[meta["t_first"], floor]])
         return 0, upd
     if meta.get("max_first") and meta["max_first"] > calib[-1][1]:
-        calib = [*calib, [meta["t_first"], meta["max_first"]]]
+        # Nouveau lot d'index : il a été publié entre le scan précédent (qui ne le voyait pas) et
+        # celui-ci. On le date au milieu, ce qui supprime le retard moyen d'une demi-période de scan.
+        prev = (s.get("last_cycle") or {}).get("t_first") or calib[-1][0]
+        calib = [*calib, [(max(prev, calib[-1][0]) + meta["t_first"]) / 2, meta["max_first"]]]
     upd["calib"] = calib
     new = classify(seen, rows, s, calib)
     if ids:
@@ -339,7 +345,8 @@ def _cycle(db: DB, s: dict, client, upd: dict):
         missed = len(active - seen_ids)
         upd["last_cycle"] = {"pages": meta["pages"], "new": new, "snaps": len(snaps),
                              "duration_s": round(time.time() - t0, 1), "at": clock_now(s),
-                             "baseline": baseline, "stale": meta.get("stale", 0), "missed": missed}
+                             "baseline": baseline, "stale": meta.get("stale", 0), "missed": missed,
+                             "t_first": meta.get("t_first")}
     if completed:
         at = clock_now(s)
         upd.update(cycles=s["cycles"] + 1, last_cycle_at=at)

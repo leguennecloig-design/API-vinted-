@@ -66,12 +66,22 @@ Si tu filtres dans la recherche, l'URL contient `catalog[]=79` → même ID.
 
 ### Nouvelle API Vinted (septembre 2026)
 Vinted a fermé `www.vinted.fr/api/v2/catalog/items` (réponse 404) au profit de
-`api.vinted.fr/svc-catalogue/items`, et **ne publie plus l'heure de mise en ligne** des annonces. L'app :
-- prend un **scan de référence** au lancement : tout ce qui est déjà en ligne est ignoré ;
-- considère comme nouvelle toute annonce dont l'**ID** (croissant dans le temps) n'a jamais été vu ;
-- **estime** l'heure de mise en ligne au milieu de deux scans (± intervalle/2, ±30 s par défaut) ;
-- **avance automatiquement un scan** si le créneau de mesure d'une annonce (fenêtre à fenêtre + 60 s)
-  risquait de tomber entre deux scans, sans jamais descendre sous 45 s d'intervalle.
+`api.vinted.fr/svc-catalogue/items`, et **ne publie plus l'heure de mise en ligne**. Comportement mesuré
+sur données réelles (nov. 2026) et pris en compte par l'app :
+- l'index de recherche est mis à jour **par lots (~toutes les 2 min)** ; les **favoris**, eux, sont en
+  temps réel ; le nombre de **vues** n'est plus fourni (colonne masquée) ;
+- Vinted sert parfois une **copie en cache plus ancienne** : détectée et redemandée ;
+- l'ordre « plus récentes » est approximatif (anciennes annonces « remontées » intercalées) ;
+- des pages de 94-95 résultats au lieu de 96 (annonces vendues entre-temps).
+
+Méthode : un **scan de référence** au lancement (tout ce qui est déjà en ligne est ignoré), puis toute
+annonce dont l'**ID** (attribué dans l'ordre de mise en ligne) dépasse ce plancher est nouvelle. Son heure
+de mise en ligne est **estimée à partir de son ID** entre deux lots d'index (précision ≈ ±30 s, sans biais).
+À chaque scan, l'app pagine jusqu'à avoir revu toutes les annonces en cours de mesure, et **avance un scan**
+si le créneau de mesure d'une annonce (fenêtre → fenêtre + 60 s) risquait de tomber entre deux scans.
+
+**« Vendue ? »** : une annonce qui disparaît des résultats avant la fin de sa fenêtre a très probablement
+été vendue (ou réservée / retirée). C'est compté par marque : un excellent signal de demande.
 
 ### Lire les résultats
 - **Favoris fenêtre** = favoris au dernier relevé pris avant *fenêtre + 60 s* d'âge.

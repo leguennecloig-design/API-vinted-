@@ -318,8 +318,12 @@ const L = {
         if (r.max_first) { S.id_floor = Math.max(...ids); S.max_seen_id = S.id_floor; S.calib = [[r.t_first, S.id_floor]]; }
       } else {
         // Calibration ID -> heure : (heure du scan, plus haut ID vu). Voir estimate_posted (app/tracker.py).
-        if (r.max_first && r.max_first > S.calib[S.calib.length - 1][1]) S.calib.push([r.t_first, r.max_first]);
-        const estimate = id => { for (let k = 1; k < S.calib.length; k++) if (id <= S.calib[k][1]) return (S.calib[k - 1][0] + S.calib[k][0]) / 2; return null; };
+        // Nouveau lot d'index Vinted : publié entre le scan précédent et celui-ci -> daté au milieu.
+        const lastC = S.calib[S.calib.length - 1];
+        if (r.max_first && r.max_first > lastC[1]) S.calib.push([(Math.max(S.last_cycle?.t_first || lastC[0], lastC[0]) + r.t_first) / 2, r.max_first]);
+        // Interpolation linéaire selon l'ID entre deux points (Vinted numérote dans l'ordre de mise en ligne).
+        const estimate = id => { for (let k = 1; k < S.calib.length; k++) { const [t0, i0] = S.calib[k - 1], [t1, i1] = S.calib[k];
+          if (id <= i1) return t0 + (t1 - t0) * (id - i0) / Math.max(1, i1 - i0); } return null; };
         for (const it of r.items) {
           let row = rec.items[it.item_id];
           if (!row) {
@@ -343,7 +347,8 @@ const L = {
       for (const w of r.warnings || []) if (!S.warnings.includes(w)) S.warnings.push(w);
       if (r.cookies) rec.cookies = r.cookies;
       const now = this.clockNow(S);
-      S.last_cycle = {pages: r.pages, new: nNew, snaps: r.items.length, at: now, baseline, stale: r.stale || 0, missed};
+      S.last_cycle = {pages: r.pages, new: nNew, snaps: r.items.length, at: now, baseline, stale: r.stale || 0, missed,
+                      t_first: r.t_first || S.last_cycle?.t_first};
       if (r.status === "ok") {
         S.cycles += 1; S.last_cycle_at = now; S.backoff_i = 0; S.api_level = "ok";
         S.api_text = baseline ? "OK — référence prise, la captation commence" : "OK";
@@ -414,7 +419,10 @@ function enrich(items, windowMin, threshold, now = null) {
     const wf = it.window_fav, wa = it.window_age;
     it.measured = wf != null;
     it.in_progress = now != null && (now - it.posted_at) < w && wf != null;
-    it.partial = wf != null && wa != null && wa < w - 30 && !it.in_progress;
+    const early = wf != null && wa != null && wa < w - 30 && !it.in_progress;
+    // Plus jamais revue alors que les scans continuaient : vendue/réservée/retirée avant la fin de sa fenêtre.
+    it.gone = early && (now == null || now - it.posted_at > w + 180) && it.last_age != null && it.last_age < w - 30;
+    it.partial = early && !it.gone;
     it.is_hit = wf != null && wf >= threshold;
     it.age_min = now ? Math.round((now - it.posted_at) / 6) / 10 : null;
     it.favs_per_min = wf != null && wa ? Math.round(wf / Math.max(wa / 60, 1) * 100) / 100 : null;
@@ -429,10 +437,10 @@ function brandStats(items) {
   for (const it of items) (g[it.brand || "(sans marque)"] ||= []).push(it);
   const out = Object.entries(g).map(([brand, its]) => {
     const favs = its.filter(i => i.window_fav != null).map(i => i.window_fav), prices = its.filter(i => i.price != null).map(i => i.price);
-    const hits = its.filter(i => i.is_hit).length, n = its.length, med = median(favs);
+    const hits = its.filter(i => i.is_hit).length, n = its.length, med = median(favs), gone = its.filter(i => i.gone).length;
     return {brand, n_items: n, hits, hit_rate: n ? r1(100 * hits / n, 1) : 0, fav_mean: favs.length ? r1(mean(favs), 1) : 0,
       fav_median: med, fav_max: favs.length ? Math.max(...favs) : 0, price_mean: prices.length ? r1(mean(prices), 2) : null,
-      score: r1(med * Math.min(n, 5) / 5 + 2 * hits, 2)};
+      score: r1(med * Math.min(n, 5) / 5 + 2 * hits, 2), gone};
   });
   return out.sort((a, b) => (b.score - a.score) || (b.hits - a.hits) || (b.n_items - a.n_items));
 }
@@ -457,13 +465,13 @@ const csvDate = t => t ? new Date(t * 1000).toLocaleString("fr-FR", {day: "2-dig
 async function exportLocal(id, kind) {
   const d = await L.detail(id), s = d.session;
   if (kind === "brands") {
-    downloadCsv([["rang", "marque", "annonces", "hits", "taux de hit (%)", "favoris moyens", "favoris médians", "favoris max", "prix moyen", "score"],
-      ...d.brands.map((b, n) => [n + 1, b.brand, b.n_items, b.hits, csvNum(b.hit_rate, 1), csvNum(b.fav_mean, 1), csvNum(b.fav_median, 1), b.fav_max, csvNum(b.price_mean), csvNum(b.score)])],
+    downloadCsv([["rang", "marque", "annonces", "hits", "taux de hit (%)", "favoris moyens", "favoris médians", "favoris max", "prix moyen", "score", "disparues (vendues ?)"],
+      ...d.brands.map((b, n) => [n + 1, b.brand, b.n_items, b.hits, csvNum(b.hit_rate, 1), csvNum(b.fav_mean, 1), csvNum(b.fav_median, 1), b.fav_max, csvNum(b.price_mean), csvNum(b.score), b.gone || 0])],
       `veille_${id}_marques.csv`);
   } else {
     downloadCsv([["id", "titre", "marque", "prix", "devise", "taille", "état", "mise en ligne", `favoris ${s.window_min} min`, "âge du relevé (min)", "mesure", "hit", "favoris dernier relevé", "vues dernier relevé", "lien"],
       ...d.items.map(i => [i.item_id, i.title, i.brand, csvNum(i.price), i.currency, i.size, i.condition, csvDate(i.posted_at), csvNum(i.window_fav),
-        csvNum(i.window_age != null ? i.window_age / 60 : null, 1), !i.measured ? "non mesurée" : i.partial ? "partielle" : i.in_progress ? "en cours" : "complète",
+        csvNum(i.window_age != null ? i.window_age / 60 : null, 1), !i.measured ? "non mesurée" : i.gone ? "disparue (vendue ?)" : i.partial ? "partielle" : i.in_progress ? "en cours" : "complète",
         i.is_hit ? "oui" : "non", csvNum(i.last_fav), csvNum(i.last_views), i.url])], `veille_${id}_annonces.csv`);
   }
 }
@@ -499,6 +507,8 @@ window.addEventListener("hashchange", route);
 /* ---------- table triable ---------- */
 const sortState = {};
 function table(id, cols, rows, defKey, rowClass) {
+  // Vinted ne fournit plus le nombre de vues (toujours 0) : colonne masquée dans ce cas.
+  cols = cols.filter(c => !c.hideIfZero || rows.some(r => r[c.key]));
   const st = sortState[id] ||= {key: defKey, dir: -1};
   const col = cols.find(c => c.key === st.key) || cols[0];
   const val = r => col.sort ? col.sort(r) : r[col.key];
@@ -531,6 +541,7 @@ const BRAND_COLS = [
   {key: "fav_mean", label: "Fav. moy.", num: true, fmt: r => nf(r.fav_mean, 1)},
   {key: "fav_max", label: "Fav. max", num: true},
   {key: "price_mean", label: "Prix moy.", num: true, fmt: r => eur(r.price_mean)},
+  {key: "gone", label: "Vendues ?", num: true, fmt: r => r.gone ? `<b style="color:var(--ok)">${r.gone}</b>` : "0"},
 ];
 const brandRows = bs => bs.map((b, i) => ({...b, _rank: i + 1}));
 const brandRowClass = r => r.hits > 0 ? "hit" : "";
@@ -538,6 +549,7 @@ const brandRowClass = r => r.hits > 0 ? "hit" : "";
 function measureTag(i) {
   if (!i.measured) return `<span class="tag p">non mesurée</span>`;
   if (i.in_progress) return `<span class="tag p">en cours</span>`;
+  if (i.gone) return `<span class="tag hit" style="background:var(--ok)" title="Disparue des résultats avant la fin de sa fenêtre : vendue, réservée ou retirée">vendue ?</span>`;
   if (i.partial) return `<span class="tag p" title="Relevé pris avant la fin de la fenêtre">partielle</span>`;
   return "";
 }
@@ -551,7 +563,7 @@ function itemCols(win) {
     {key: "favs_per_min", label: "Fav./min", num: true, fmt: i => nf(i.favs_per_min, 2)},
     {key: "title", label: "Titre", cls: "title", fmt: i => `<a href="${esc(i.url)}" target="_blank" rel="noopener">${esc(i.title || "Annonce")}</a>`},
     {key: "last_fav", label: "Fav. dernier", num: true},
-    {key: "last_views", label: "Vues", num: true},
+    {key: "last_views", label: "Vues", num: true, hideIfZero: true},
     {key: "size", label: "Taille"},
     {key: "posted_at", label: "En ligne", fmt: i => new Date(i.posted_at * 1000).toLocaleTimeString("fr-FR", {hour: "2-digit", minute: "2-digit"})},
   ];
@@ -561,7 +573,7 @@ function itemCols(win) {
 let lastState = null;
 
 /* Sur Vercel, rien ne tourne en fond : c'est la page ouverte qui déclenche les scans. */
-let tickInFlight = false;
+let tickInFlight = false, demoKick = null;
 function kick() {
   if (tickInFlight) return;
   tickInFlight = true;
@@ -746,6 +758,7 @@ function renderLive(s, token) {
     location.hash = `#session/${se.id}`;
   };
   kick(); keepAwake(true);
+  if (s.demo && !demoKick) demoKick = setInterval(() => { if (lastState?.running) kick(); else { clearInterval(demoKick); demoKick = null; } }, 200);
   pollTimer = setTimeout(() => { if (token === renderToken) viewWatch(token); }, s.demo ? 1000 : 5000);
 }
 
@@ -757,7 +770,8 @@ async function viewSession(id, token) {
     $("#app").innerHTML = `<div class="card"><div class="err">${esc(e.message)}</div><p><a href="#historique">← Historique</a></p></div>`; return; }
   if (token !== renderToken) return;
   const s = d.session, win = s.window_min;
-  const hits = d.items.filter(i => i.is_hit).length, partial = d.items.filter(i => i.partial).length;
+  $("#navdot").classList.toggle("hidden", !d.live);
+  const hits = d.items.filter(i => i.is_hit).length, partial = d.items.filter(i => i.partial).length, gone = d.items.filter(i => i.gone).length;
   const f = s.filters;
   $("#app").innerHTML = `
   <div class="card">
@@ -782,11 +796,13 @@ async function viewSession(id, token) {
       <div><span>Relevés</span><b>${nf(s.n_snapshots)}</b></div>
     </div>
     ${f.catalog_ids?.length ? `<div class="chips"><span class="chip gray">catalog : ${f.catalog_ids.join(", ")}</span>${f.brand_ids?.length ? `<span class="chip gray">brand_ids : ${f.brand_ids.join(", ")}</span>` : ""}${f.size_ids?.length ? `<span class="chip gray">size_ids : ${f.size_ids.join(", ")}</span>` : ""}${f.status_ids?.length ? `<span class="chip gray">status_ids : ${f.status_ids.join(", ")}</span>` : ""}</div>` : ""}
+    ${gone ? `<div class="notice" style="margin-top:10px"><span>🟢 ${gone} annonce(s) ont disparu des résultats avant la fin de leur fenêtre : probablement <b>vendues</b> (ou réservées / retirées). Signal de forte demande.</span></div>` : ""}
     ${partial ? `<div class="warnbox">${partial} mesure(s) partielle(s) : le dernier relevé a été pris avant la fin des ${win} min (veille arrêtée, pause API…). Les favoris réels sont probablement plus élevés.</div>` : ""}
     ${(s.warnings || []).map(w => `<div class="warnbox">⚠ ${esc(w)}</div>`).join("")}
   </div>
   <div class="card"><h2>Classement des marques</h2><div id="tb"></div>
-    <div class="hint">Vinted ne publie plus l'heure de mise en ligne : elle est estimée au milieu de deux scans (± ${Math.round(s.interval_s / 2)} s).
+    <div class="hint">Vinted ne publie plus l'heure de mise en ligne : elle est estimée d'après le numéro de l'annonce et les mises à jour de l'index Vinted (précision ≈ ±30 s).
+      « Vendue ? » = annonce disparue des résultats avant la fin de sa fenêtre.
       Score = médiane des favoris × min(annonces, 5)/5 + 2 × hits. Lignes orange = au moins un hit. Clique sur une colonne pour trier.</div></div>
   <div class="card"><h2>Annonces</h2><div id="ti"></div></div>`;
   const draw = () => {
@@ -809,6 +825,7 @@ async function viewSession(id, token) {
 async function viewHistory(token) {
   const list = await api("/api/sessions").catch(() => []);
   if (token !== renderToken) return;
+  $("#navdot").classList.toggle("hidden", !list.some(x => x.status === "running"));
   $("#app").innerHTML = `<div class="card"><h2>Historique des veilles</h2>
     ${list.length ? `<div class="hist">${list.map(s => `
       <div class="h card" style="margin:0;box-shadow:none">

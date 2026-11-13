@@ -62,7 +62,7 @@ async def local_loop():
         except Exception:
             logging.exception("tick")
         run = db.running_session()
-        await asyncio.sleep(1 if run and run["demo"] else 5)
+        await asyncio.sleep(0.2 if run and run["demo"] else 5)  # démo x30 : 0,2 s réel = 6 s simulées
 
 
 @asynccontextmanager
@@ -338,7 +338,8 @@ def export_items(sid: int):
              f"favoris {s['window_min']} min", "âge du relevé (min)", "mesure", "hit",
              "favoris dernier relevé", "vues dernier relevé", "lien"]]
     for i in items:
-        mesure = "non mesurée" if not i["measured"] else "partielle" if i["partial"] else \
+        mesure = "non mesurée" if not i["measured"] else "disparue (vendue ?)" if i.get("gone") else \
+            "partielle" if i["partial"] else \
             "en cours" if i["in_progress"] else "complète"
         rows.append([i["item_id"], i["title"], i["brand"], _num(i["price"]), i["currency"], i["size"],
                      i["condition"], _ts(i["posted_at"]), _num(i["window_fav"]),
@@ -352,10 +353,11 @@ def export_items(sid: int):
 def export_brands(sid: int):
     s, _, brands, _ = _session_data(sid)
     rows = [["rang", "marque", "annonces", "hits", "taux de hit (%)", "favoris moyens",
-             "favoris médians", "favoris max", "prix moyen", "score"]]
+             "favoris médians", "favoris max", "prix moyen", "score", "disparues (vendues ?)"]]
     for n, b in enumerate(brands, 1):
         rows.append([n, b["brand"], b["n_items"], b["hits"], _num(b["hit_rate"], 1), _num(b["fav_mean"], 1),
-                     _num(float(b["fav_median"]), 1), b["fav_max"], _num(b["price_mean"]), _num(b["score"])])
+                     _num(float(b["fav_median"]), 1), b["fav_max"], _num(b["price_mean"]), _num(b["score"]),
+                     b.get("gone", 0)])
     return _csv_response(rows, f"veille_{sid}_marques.csv")
 
 

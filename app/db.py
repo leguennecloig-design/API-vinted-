@@ -239,7 +239,13 @@ def enrich_items(items: list[dict], window_min: int, threshold: int, now: float 
         it["in_progress"] = bool(now is not None and (now - it["posted_at"]) < w and wf is not None)
         # Mesure partielle : le relevé retenu a été pris trop tôt (plus de 30 s avant la fin de la
         # fenêtre), par ex. veille arrêtée ou pause anti-blocage. 30 s de tolérance pour l'aléa des scans.
-        it["partial"] = bool(wf is not None and wa is not None and wa < w - 30 and not it["in_progress"])
+        early = bool(wf is not None and wa is not None and wa < w - 30 and not it["in_progress"])
+        # Annonce plus jamais revue après ce relevé, alors que les scans continuaient : elle a disparu
+        # des résultats (vendue, réservée ou retirée) avant la fin de sa fenêtre. Signal de forte demande.
+        la = it.get("last_age")
+        ended = now is None or now - it["posted_at"] > w + 180
+        it["gone"] = bool(early and ended and la is not None and la < w - 30)
+        it["partial"] = early and not it["gone"]
         it["is_hit"] = bool(wf is not None and wf >= threshold)
         it["age_min"] = round((now - it["posted_at"]) / 60, 1) if now else None
         it["favs_per_min"] = round(wf / max(wa / 60, 1), 2) if wf is not None and wa else None
@@ -255,6 +261,7 @@ def brand_stats(items: list[dict]) -> list[dict]:
         favs = [i["window_fav"] for i in its if i["window_fav"] is not None]
         prices = [i["price"] for i in its if i.get("price") is not None]
         hits = sum(1 for i in its if i["is_hit"])
+        gone = sum(1 for i in its if i.get("gone"))
         n = len(its)
         med = statistics.median(favs) if favs else 0
         out.append({
@@ -266,6 +273,7 @@ def brand_stats(items: list[dict]) -> list[dict]:
             "fav_median": med,
             "fav_max": max(favs) if favs else 0,
             "price_mean": round(statistics.fmean(prices), 2) if prices else None,
+            "gone": gone,
             "score": round(med * min(n, 5) / 5 + 2 * hits, 2),
         })
     out.sort(key=lambda b: (b["score"], b["hits"], b["n_items"]), reverse=True)
