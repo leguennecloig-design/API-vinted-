@@ -265,7 +265,7 @@ const L = {
       ended_at: null, status: "running", demo: b.demo ? 1 : 0, speed: b.demo ? INFO.demo_speed : 1, demo_t0: b.demo ? real : null,
       seed: Math.floor(Math.random() * 1e9) + 1, filters: f, filters_label: filtersLabel(f), duration_min: dur_, window_min: win,
       hit_threshold: b.threshold, interval_s: Math.max(45, b.interval_s), cycles: 0, requests: 0, next_tick_at: 0,
-      last_cycle_at: null, backoff_i: 0, api_level: "ok", api_text: "Démarrage… premier scan imminent",
+      last_cycle_at: null, id_floor: null, max_seen_id: null, backoff_i: 0, api_level: "ok", api_text: "Démarrage… premier scan imminent",
       last_cycle: {}, warnings: [], summary: null};
     await this.save({s, items: {}, cookies: null, snaps: 0});
     return {session_id: id};
@@ -300,8 +300,12 @@ const L = {
     if (this.clockNow(s) < s.next_tick_at) return {ran: false};
     this.busy = true;
     try {
-      const body = {filters: s.filters, start_ts: s.start_ts, window_min: s.window_min, cookies: rec.cookies,
-                    demo: s.demo ? {seed: s.seed, now: this.clockNow(s), speed: s.speed, request_no: s.requests} : null};
+      const baseline = s.id_floor == null, now0 = this.clockNow(s), W0 = s.window_min * 60;
+      // Vinted ne donne plus de date : on pagine jusqu'à la plus ancienne annonce encore à mesurer (par ID).
+      const active = Object.values(rec.items).filter(i => now0 - i.posted_at <= W0 + 120).map(i => i.item_id);
+      const stop_id = baseline ? null : (active.length ? Math.min(...active) : s.max_seen_id);
+      const body = {filters: s.filters, stop_id, baseline, cookies: rec.cookies,
+                    demo: s.demo ? {seed: s.seed, now: now0, speed: s.speed, request_no: s.requests} : null};
       let r;
       try { r = await serverApi("/api/scan", {method: "POST", body: JSON.stringify(body)}); }
       catch (e) { r = {status: "error", message: e.message, items: [], requests: 0, pages: 0, warnings: []}; }
@@ -309,27 +313,41 @@ const L = {
       if (!fresh || fresh.s.status !== "running") return {ran: false};
       Object.assign(rec, fresh); const S = rec.s;
       const W = S.window_min * 60; let nNew = 0;
-      for (const it of r.items) {
+      const ids = r.items.map(i => i.item_id);
+      if (baseline) {
+        // Scan de référence : tout ce qui est déjà en ligne est ignoré (ID <= plancher).
+        if (r.status === "ok" && ids.length) { S.id_floor = Math.max(...ids); S.max_seen_id = S.id_floor; }
+      } else for (const it of r.items) {
         let row = rec.items[it.item_id];
         if (!row) {
-          if (!(S.start_ts <= it.posted_at && it.posted_at <= S.capture_end)) continue;   // captation uniquement
+          if (it.item_id <= (S.id_floor || 0)) continue;                // déjà en ligne avant la veille
+          // Heure de mise en ligne estimée : milieu entre le scan précédent et celui-ci.
+          const posted = it.posted_at ?? (S.last_cycle_at ? (S.last_cycle_at + it.seen_at) / 2 : it.seen_at);
+          if (!(S.start_ts <= posted && posted <= S.capture_end)) continue;   // captation uniquement
           row = {session_id: S.id, item_id: it.item_id, title: it.title, brand: it.brand, price: it.price, currency: it.currency,
-                 size: it.size, condition: it.condition, url: it.url, photo_url: it.photo_url, posted_at: it.posted_at,
-                 first_seen: it.seen_at, first_age: it.age, window_fav: null, window_age: null};
+                 size: it.size, condition: it.condition, url: it.url, photo_url: it.photo_url, posted_at: posted,
+                 first_seen: it.seen_at, first_age: it.seen_at - posted, window_fav: null, window_age: null};
           nNew++;
         }
-        row.last_age = it.age; row.last_fav = it.favs; row.last_views = it.views;
-        if (it.age <= W + 60 && (row.window_age == null || it.age >= row.window_age)) { row.window_fav = it.favs; row.window_age = it.age; }
+        const age = it.seen_at - row.posted_at;
+        row.last_age = age; row.last_fav = it.favs; row.last_views = it.views;
+        if (age <= W + 60 && (row.window_age == null || age >= row.window_age)) { row.window_fav = it.favs; row.window_age = age; }
         rec.items[it.item_id] = row; rec.snaps = (rec.snaps || 0) + 1;
       }
+      if (!baseline && ids.length) S.max_seen_id = Math.max(S.max_seen_id || 0, ...ids);
       S.requests += r.requests || 0;
       for (const w of r.warnings || []) if (!S.warnings.includes(w)) S.warnings.push(w);
       if (r.cookies) rec.cookies = r.cookies;
       const now = this.clockNow(S);
-      S.last_cycle = {pages: r.pages, new: nNew, snaps: r.items.length, at: now};
+      S.last_cycle = {pages: r.pages, new: nNew, snaps: r.items.length, at: now, baseline};
       if (r.status === "ok") {
-        S.cycles += 1; S.last_cycle_at = now; S.backoff_i = 0; S.api_level = "ok"; S.api_text = "OK";
-        S.next_tick_at = Math.min(now + S.interval_s + Math.random() * 6, S.final_end + 1);
+        S.cycles += 1; S.last_cycle_at = now; S.backoff_i = 0; S.api_level = "ok";
+        S.api_text = baseline ? "OK — référence prise, la captation commence" : "OK";
+        let nxt = now + (baseline ? 20 : S.interval_s + Math.random() * 6);
+        // Si le créneau de mesure d'une annonce (W à W+60 s) tombe entre deux scans, on vise son milieu.
+        const targets = Object.values(rec.items).map(i => i.posted_at + W + 60).filter(e => now < e && e < nxt).map(e => e - 30);
+        if (targets.length) nxt = Math.min(nxt, Math.max(now + 45, Math.min(...targets)));
+        S.next_tick_at = Math.min(nxt, S.final_end + 1);
       } else if (r.status === "rate_limited") {
         const bo = INFO.backoff || [30, 60, 120, 240, 480, 600], delay = bo[Math.min(S.backoff_i, bo.length - 1)];
         S.backoff_i += 1; S.api_level = "warn"; S.next_tick_at = now + delay; rec.cookies = null;
@@ -762,7 +780,8 @@ async function viewSession(id, token) {
     ${(s.warnings || []).map(w => `<div class="warnbox">⚠ ${esc(w)}</div>`).join("")}
   </div>
   <div class="card"><h2>Classement des marques</h2><div id="tb"></div>
-    <div class="hint">Score = médiane des favoris × min(annonces, 5)/5 + 2 × hits. Lignes orange = au moins un hit. Clique sur une colonne pour trier.</div></div>
+    <div class="hint">Vinted ne publie plus l'heure de mise en ligne : elle est estimée au milieu de deux scans (± ${Math.round(s.interval_s / 2)} s).
+      Score = médiane des favoris × min(annonces, 5)/5 + 2 × hits. Lignes orange = au moins un hit. Clique sur une colonne pour trier.</div></div>
   <div class="card"><h2>Annonces</h2><div id="ti"></div></div>`;
   const draw = () => {
     $("#tb").innerHTML = table("brands", BRAND_COLS, brandRows(d.brands), "score", brandRowClass);

@@ -42,7 +42,9 @@ SESSION_COLS = """
     cookies       TEXT,
     last_cycle    TEXT NOT NULL DEFAULT '{{}}',
     warnings      TEXT NOT NULL DEFAULT '[]',
-    summary       TEXT
+    summary       TEXT,
+    id_floor      {big},
+    max_seen_id   {big}
 """
 ITEM_COLS = ["session_id", "item_id", "title", "brand", "price", "currency", "size", "condition", "url",
              "photo_url", "posted_at", "first_seen", "first_age", "last_age", "last_fav", "last_views",
@@ -54,7 +56,7 @@ def _schema(pg: bool) -> list[str]:
     pk = "id BIGSERIAL PRIMARY KEY" if pg else "id INTEGER PRIMARY KEY AUTOINCREMENT"
     big = "BIGINT" if pg else "INTEGER"
     return [
-        f"CREATE TABLE IF NOT EXISTS sessions ({pk}, {SESSION_COLS.format(real=real)})",
+        f"CREATE TABLE IF NOT EXISTS sessions ({pk}, {SESSION_COLS.format(real=real, big=big)})",
         f"""CREATE TABLE IF NOT EXISTS items (
             session_id {big} NOT NULL, item_id {big} NOT NULL, title TEXT, brand TEXT,
             price {real}, currency TEXT, size TEXT, condition TEXT, url TEXT, photo_url TEXT,
@@ -76,6 +78,16 @@ class DB:
         with self.lock:
             for stmt in _schema(self.pg):
                 self.execute(stmt)
+            # Migration des bases créées avant la nouvelle API Vinted (sept. 2026).
+            big = "BIGINT" if self.pg else "INTEGER"
+            for col in ("id_floor", "max_seen_id"):
+                try:
+                    if self.pg:
+                        self.execute(f"ALTER TABLE sessions ADD COLUMN IF NOT EXISTS {col} {big}")
+                    else:
+                        self.execute(f"ALTER TABLE sessions ADD COLUMN {col} {big}")
+                except Exception:
+                    pass
 
     # ------------------------------------------------------------------ bas niveau
     def _connect(self):

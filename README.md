@@ -64,6 +64,15 @@ Sur vinted.fr, clique sur une catégorie (ex. Hommes › Sweats) : l'URL devient
 `https://www.vinted.fr/catalog/79-sweats-and-hoodies` → l'ID est **79**.
 Si tu filtres dans la recherche, l'URL contient `catalog[]=79` → même ID.
 
+### Nouvelle API Vinted (septembre 2026)
+Vinted a fermé `www.vinted.fr/api/v2/catalog/items` (réponse 404) au profit de
+`api.vinted.fr/svc-catalogue/items`, et **ne publie plus l'heure de mise en ligne** des annonces. L'app :
+- prend un **scan de référence** au lancement : tout ce qui est déjà en ligne est ignoré ;
+- considère comme nouvelle toute annonce dont l'**ID** (croissant dans le temps) n'a jamais été vu ;
+- **estime** l'heure de mise en ligne au milieu de deux scans (± intervalle/2, ±30 s par défaut) ;
+- **avance automatiquement un scan** si le créneau de mesure d'une annonce (fenêtre à fenêtre + 60 s)
+  risquait de tomber entre deux scans, sans jamais descendre sous 45 s d'intervalle.
+
 ### Lire les résultats
 - **Favoris fenêtre** = favoris au dernier relevé pris avant *fenêtre + 60 s* d'âge.
   « partielle » = ce relevé a été pris trop tôt (veille arrêtée, pause anti-blocage…).

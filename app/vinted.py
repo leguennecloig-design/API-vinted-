@@ -116,29 +116,45 @@ def _price(v) -> tuple[float | None, str]:
 
 
 def normalize_item(raw: dict) -> dict | None:
-    """Ne garde que les champs de l'annonce. Les infos vendeur (raw['user']) sont ignorées."""
+    """Ne garde que les champs de l'annonce. Les infos vendeur (raw['user']) sont ignorées.
+
+    API svc-catalogue (sept. 2026) : plus de date de mise en ligne (posted_at = None, estimée par
+    le tracker), marque et taille dans item_box (« first_line » = marque si différente du titre,
+    « second_line » = « taille · état »), URL relative.
+    """
+    iid = raw.get("id")
+    if iid is None:
+        return None
     photo = raw.get("photo") or {}
     ts = (photo.get("high_resolution") or {}).get("timestamp")
-    if not ts:
-        return None
     price, cur = _price(raw.get("price"))
     thumb = photo.get("url")
     for t in photo.get("thumbnails") or []:
-        if t.get("type") in ("thumb310x430", "thumb150x210"):
+        if t.get("type") == "thumb310x430":
             thumb = t.get("url") or thumb
             break
-    iid = raw.get("id")
+    title = raw.get("title") or ""
+    box = raw.get("item_box") or {}
+    brand = (raw.get("brand_title") or "").strip()
+    if not brand and box.get("first_line") and box["first_line"] != title:
+        brand = box["first_line"].strip()
+    second = [x.strip() for x in (box.get("second_line") or "").split("·")]
+    size = raw.get("size_title") or (second[0] if len(second) > 1 else "")
+    condition = raw.get("status") or (second[-1] if second and second[-1] else "")
+    url = raw.get("url") or f"/items/{iid}"
+    if url.startswith("/"):
+        url = BASE + url
     return {
         "item_id": int(iid),
-        "title": raw.get("title") or "",
-        "brand": (raw.get("brand_title") or "").strip() or "(sans marque)",
+        "title": title,
+        "brand": brand or "(sans marque)",
         "price": price,
         "currency": cur,
-        "size": raw.get("size_title") or "",
-        "condition": raw.get("status") or "",
-        "url": raw.get("url") or f"{BASE}/items/{iid}",
+        "size": size,
+        "condition": condition,
+        "url": url,
         "photo_url": thumb or "",
-        "posted_at": float(ts),
+        "posted_at": float(ts) if ts else None,
         "favs": int(raw.get("favourite_count") or 0),
         "views": int(raw.get("view_count") or 0),
         "promoted": bool(raw.get("promoted") or raw.get("is_promoted")),
@@ -275,9 +291,10 @@ class DemoClient:
                 price = max(price, pf)
             if pt is not None:
                 price = min(price, pt)
+            ts = b * 60 + rng.random() * 60
             out.append({
-                "id": 4_000_000_000 + (self.seed % 100_000) * 10_000 + (b % 1000) * 10 + k,
-                "brand": brand, "price": price, "ts": b * 60 + rng.random() * 60,
+                "id": int(ts) * 10 + k,  # comme sur Vinted : l'ID croît avec le temps
+                "brand": brand, "price": price, "ts": ts,
                 "q": rng.lognormvariate(0, 0.6), "heat": heat,
                 "title": f"{brand or 'Pièce'} – {rng.choice(['Sweat', 'Veste', 'Hoodie', 'Pull', 'Polaire', 'T-shirt'])}",
                 "size": rng.choice(["XS", "S", "M", "L", "XL"]),
@@ -285,17 +302,17 @@ class DemoClient:
         return sorted(out, key=lambda i: i["ts"], reverse=True)
 
     def _raw(self, it: dict) -> dict:
+        """Même forme que svc-catalogue : pas d'horodatage, marque/taille dans item_box."""
         age_min = max(0.0, (self.now - it["ts"]) / 60)
         tau = 12.0
         favs = int(it["heat"] * it["q"] * tau * (1 - math.exp(-age_min / tau)))
         views = int(favs * 7 + age_min * 4 * (0.5 + it["q"]))
         return {
-            "id": it["id"], "title": it["title"], "brand_title": it["brand"],
-            "price": {"amount": f"{it['price']:.1f}", "currency_code": "EUR"},
-            "size_title": it["size"], "status": "Très bon état",
-            "url": f"{BASE}/items/{it['id']}", "favourite_count": favs, "view_count": views,
-            "photo": {"url": f"/demo-photo/{it['id']}.svg?b={it['brand'] or 'NA'}",
-                      "high_resolution": {"timestamp": int(it["ts"])}},
+            "id": it["id"], "title": it["title"], "promoted": False,
+            "price": {"amount": f"{it['price']:.2f}", "currency_code": "EUR"},
+            "item_box": {"first_line": it["brand"] or it["title"], "second_line": f"{it['size']} · Très bon état"},
+            "url": f"/items/{it['id']}-demo", "favourite_count": favs, "view_count": views,
+            "photo": {"url": f"/demo-photo/{it['id']}.svg?b={it['brand'] or 'NA'}", "high_resolution": {}},
             "user": {"login": "non-stocké"},  # présent dans l'API, volontairement ignoré
         }
 

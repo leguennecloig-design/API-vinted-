@@ -183,8 +183,8 @@ class DemoParams(BaseModel):
 
 class ScanBody(BaseModel):
     filters: dict
-    start_ts: float
-    window_min: int = Field(ge=1)
+    stop_id: int | None = None      # on pagine jusqu'à passer sous cet ID
+    baseline: bool = False          # scan de référence (1 page) au lancement
     cookies: dict | None = None
     demo: DemoParams | None = None
     debug: bool = False
@@ -214,14 +214,14 @@ def scan(body: ScanBody):
         except Exception as e:
             return {"status": "error", "message": f"{type(e).__name__}: {e}"}
     try:
-        tracker.scan_pages(client, body.filters, body.start_ts, body.window_min * 60 + 120, now_fn, sleep_fn,
-                           out, meta, warnings.append)
+        tracker.scan_pages(client, body.filters, body.stop_id, now_fn, sleep_fn, out, meta, warnings.append,
+                           max_pages=1 if body.baseline else tracker.MAX_PAGES)
     except vinted.RateLimited as e:
         res = {"status": "rate_limited", "http": e.status}
     except vinted.ApiError as e:
         res = {"status": "error", "message": str(e)}
     keep = ("item_id", "title", "brand", "price", "currency", "size", "condition", "url", "photo_url",
-            "posted_at", "favs", "views", "age", "seen_at")
+            "posted_at", "favs", "views", "seen_at")
     res.update(items=[{k: it[k] for k in keep} for it in out], pages=meta["pages"], requests=meta["requests"],
                warnings=warnings, now=now_fn(),
                cookies=(client.export_cookies() if not client.demo and client.warmed else None))
