@@ -78,7 +78,11 @@ def enrich(it: dict, window_min: int, threshold: int, now: float | None) -> dict
     # de sa fenêtre. C'est le signal de demande le plus fort.
     la = it.get("last_age")
     ended = now is None or age_now > w + 180
-    it["gone"] = bool(early and ended and la is not None and la < w - TOL_BEFORE)
+    # Il faut 2 absences « prouvées » CONSÉCUTIVES (scans complets, pas bloqués par la limite de 10 pages
+    # de Vinted), et un dernier relevé à plus d'1 min de la fin de fenêtre, pour conclure à une
+    # disparition ; sinon l'annonce était seulement hors de portée -> partielle.
+    proven = (it.get("cps") or {}).get("_m", 0) >= 2
+    it["gone"] = bool(early and ended and la is not None and la < w - TOL_AFTER and proven)
     it["partial"] = early and not it["gone"]
     # Hit : seuil atteint dans la fenêtre (pour une annonce en cours, ses favoris actuels sont dans la fenêtre).
     cur = it.get("last_fav") if it["in_progress"] else wf

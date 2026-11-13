@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import math
+import os
 import random
 import re
 import time
@@ -24,6 +25,10 @@ class RateLimited(Exception):
 
 class ApiError(Exception):
     pass
+
+
+class PageLimit(Exception):
+    """Vinted refuse d'aller au-delà de la page 10 (960 résultats) : HTTP 400 INVALID_REQUEST."""
 
 
 # ---------------------------------------------------------------- filtres
@@ -244,6 +249,8 @@ class VintedClient:
                 continue
             if r.status_code in (403, 429):
                 raise RateLimited(r.status_code)
+            if r.status_code == 400 and page > 1:
+                raise PageLimit(page)
             if r.status_code != 200:
                 snippet = " ".join((r.text or "")[:200].split())
                 raise ApiError(f"HTTP {r.status_code} sur {str(r.url)[:140]} — {snippet}")
@@ -265,7 +272,7 @@ DEMO_BRANDS = [
     ("Stone Island", 2.9, 140, 2), ("Kiabi", 0.05, 5, 5), ("", 0.2, 12, 6),
 ]
 DEMO_SPEED = 30.0   # 1 minute simulée = 2 secondes réelles
-DEMO_RATE = 8.0     # annonces / minute simulée
+DEMO_RATE = float(os.environ.get("VNW_DEMO_RATE", "8"))  # annonces / minute simulée
 
 
 class DemoClient:
@@ -305,7 +312,7 @@ class DemoClient:
                 price = min(price, pt)
             ts = b * 60 + rng.random() * 60
             out.append({
-                "id": int(ts) * 10 + k,  # comme sur Vinted : l'ID croît avec le temps
+                "id": int(ts * 1000) * 100 + k % 100,  # comme sur Vinted : ID unique, croissant avec le temps
                 "brand": brand, "price": price, "ts": ts,
                 "q": rng.lognormvariate(0, 0.6), "heat": heat,
                 "title": f"{brand or 'Pièce'} – {rng.choice(['Sweat', 'Veste', 'Hoodie', 'Pull', 'Polaire', 'T-shirt'])}",
@@ -337,13 +344,19 @@ class DemoClient:
         self.request_no += 1
         if self.request_no == 25:  # un 429 simulé, pour tester l'affichage du backoff
             raise RateLimited(429)
+        if page > 10:  # comme Vinted : pas au-delà de la page 10
+            raise PageLimit(page)
         rng = random.Random(f"{self.seed}:req:{self.request_no}")
         phase = self.seed % 120
         cut = math.floor((self.now - phase) / 120) * 120 + phase  # dernier lot indexé
         if rng.random() < 0.15:
             cut -= 120
 
+        pf, pt = filters.get("price_from"), filters.get("price_to")
+
         def available(i: dict) -> bool:
+            if (pf is not None and i["price"] < pf) or (pt is not None and i["price"] > pt):
+                return False  # filtre de prix (utile pour les tranches de prix automatiques)
             sold = random.Random(f"{self.seed}:sold:{i['id']}")
             return not (sold.random() < 0.05 and self.now > i["ts"] + sold.uniform(60, 1800))
 
@@ -358,7 +371,7 @@ class DemoClient:
         chunk = found[(page - 1) * PER_PAGE: need]
         for k in range(2):  # annonces anciennes remontées (ID très bas)
             if chunk:
-                old = dict(chunk[0], id=int(cut - 86400 * rng.randint(2, 300)) * 10 + 9,
+                old = dict(chunk[0], id=int((cut - 86400 * rng.randint(2, 300)) * 1000) * 100 + 99,
                            ts=cut - 86400 * 2, title="Ancienne annonce remontée")
                 chunk.insert(rng.randrange(len(chunk)), old)
                 chunk.pop()

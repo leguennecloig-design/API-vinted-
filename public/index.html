@@ -127,7 +127,7 @@ tr.hit td{background:var(--hit)}
 tr.hit td:first-child{box-shadow:inset 3px 0 var(--hit-line)}
 td img{width:34px;height:44px;object-fit:cover;border-radius:6px;vertical-align:middle;background:var(--bg)}
 .score{font-weight:700;color:var(--brand)}
-.tag{font-size:11px;font-weight:700;border-radius:6px;padding:2px 6px}
+.tag{font-size:11px;font-weight:700;border-radius:6px;padding:2px 6px;white-space:nowrap;display:inline-block}
 .tag.hit{background:var(--hit-line);color:#fff}
 .tag.p{background:var(--bg);color:var(--muted)}
 .tag.hot{background:color-mix(in srgb,var(--err) 16%,transparent);color:var(--err)}
@@ -305,8 +305,19 @@ const L = {
     try {
       const baseline = s.id_floor == null, now0 = this.clockNow(s), W0 = s.window_min * 60;
       // Annonces dont la mesure n'est pas finie : le serveur pagine jusqu'à les avoir toutes revues.
-      const active = baseline ? [] : Object.values(rec.items).filter(i => now0 - i.posted_at <= W0 + 150).map(i => i.item_id);
-      const body = {filters: s.filters, active_ids: active, max_seen: s.max_seen_id, baseline, cookies: rec.cookies,
+      const activeItems = baseline ? [] : Object.values(rec.items).filter(i => now0 - i.posted_at <= W0 + 150);
+      const active = activeItems.map(i => i.item_id);
+      // [id, prix] : le serveur découpe en tranches de prix si trop d'annonces à suivre pour 10 pages.
+      // Profondeur à parcourir = rythme de mise en ligne observé × âge de la plus ancienne annonce active (cf. tracker.needed_depth).
+      let depth = 0;
+      if (activeItems.length) {
+        const all = Object.values(rec.items), elapsed = Math.max(60, Math.min(now0, s.capture_end) - s.start_ts);
+        const rate = all.filter(i => i.posted_at <= s.capture_end).length / (elapsed / 60);
+        const oldest = Math.max(...activeItems.map(i => now0 - i.posted_at)) / 60;
+        depth = Math.round(Math.max(activeItems.length + 150, rate * oldest * 1.1 + 50));
+      }
+      const expect_new = !baseline && !!s.calib?.length && now0 - s.calib[s.calib.length - 1][0] > 100;   // nouveau lot attendu
+      const body = {filters: s.filters, active: activeItems.map(i => [i.item_id, i.price]), depth, expect_new, max_seen: s.max_seen_id, baseline, cookies: rec.cookies,
                     demo: s.demo ? {seed: s.seed, now: now0, speed: s.speed, request_no: s.requests} : null};
       let r;
       try { r = await serverApi("/api/scan", {method: "POST", body: JSON.stringify(body)}); }
@@ -325,16 +336,22 @@ const L = {
         // Nouveau lot d'index Vinted : publié entre le scan précédent et celui-ci -> daté au milieu.
         const lastC = S.calib[S.calib.length - 1];
         if (r.max_first && r.max_first > lastC[1]) S.calib.push([(Math.max(S.last_cycle?.t_first || lastC[0], lastC[0]) + r.t_first) / 2, r.max_first]);
-        // Interpolation linéaire selon l'ID entre deux points (Vinted numérote dans l'ordre de mise en ligne).
-        const estimate = id => { for (let k = 1; k < S.calib.length; k++) { const [t0, i0] = S.calib[k - 1], [t1, i1] = S.calib[k];
-          if (id <= i1) return t0 + (t1 - t0) * (id - i0) / Math.max(1, i1 - i0); } return null; };
+        // Droite robuste heure = a + k × ID (Theil-Sen) sur les 20 derniers lots : voir fit_calib (app/tracker.py).
+        const P = S.calib.slice(-20), slopes = [];
+        for (let a = 0; a < P.length; a++) for (let b = a + 1; b < P.length; b++) if (P[b][1] > P[a][1]) slopes.push((P[b][0] - P[a][0]) / (P[b][1] - P[a][1]));
+        slopes.sort((x, y) => x - y);
+        const kk = slopes.length ? slopes[slopes.length >> 1] : null;
+        const resid = kk == null ? [] : P.map(([t, i]) => t - i * kk).sort((x, y) => x - y);
+        const aa = resid.length ? resid[(resid.length - 1) >> 1] : null;
+        const estimate = id => kk == null ? null : aa + id * kk;
         for (const it of r.items) {
           let row = rec.items[it.item_id];
           if (!row) {
             if (it.item_id <= (S.id_floor || 0)) continue;                // déjà en ligne avant la veille
-            // Pas visible avant le lot d'index précédant sa 1re apparition (ex. brouillon publié tard).
-            const lower = S.calib.length >= 2 ? S.calib[S.calib.length - 2][0] : (S.calib[0]?.[0] ?? it.seen_at);
-            const posted = Math.min(Math.max(it.posted_at ?? estimate(it.item_id) ?? it.seen_at, lower), it.seen_at);
+            // Brouillon publié tard (ID > 6 min plus ancien que sa 1re apparition) : daté au lot précédent.
+            let posted = it.posted_at ?? estimate(it.item_id) ?? it.seen_at;
+            if (it.seen_at - posted > 360) posted = S.calib.length >= 2 ? S.calib[S.calib.length - 2][0] : (S.calib[0]?.[0] ?? it.seen_at);
+            posted = Math.min(posted, it.seen_at);
             if (!(S.start_ts <= posted && posted <= S.capture_end)) continue;   // captation uniquement
             row = {session_id: S.id, item_id: it.item_id, title: it.title, brand: it.brand, price: it.price, currency: it.currency,
                    size: it.size, condition: it.condition, url: it.url, photo_url: it.photo_url, posted_at: posted,
@@ -342,6 +359,7 @@ const L = {
             nNew++;
           }
           const age = it.seen_at - row.posted_at;
+          if (row.cps) delete row.cps._m;   // revue : le compteur d'absences consécutives repart à zéro
           if (age <= W + M.MAX_GAP) {   // au-delà, les relevés ne servent plus à la mesure
             row.last_age = age; row.last_fav = it.favs; row.last_views = it.views;
             // Paliers 5 / 10 / 15 min… : favoris interpolés entre les relevés qui les encadrent.
@@ -352,12 +370,14 @@ const L = {
         }
         if (ids.length) S.max_seen_id = Math.max(S.max_seen_id || 0, ...ids);
       }
-      const seenIds = new Set(r.items.map(i => i.item_id)), missed = active.filter(id => !seenIds.has(id)).length;
+      const seenIds = new Set(r.items.map(i => i.item_id)), missedIds = active.filter(id => !seenIds.has(id)), missed = missedIds.length;
+      // Absence « prouvée » seulement si le scan est allé au bout (pas bloqué par la limite des 10 pages).
+      if (!baseline && r.status === "ok" && !r.limited) for (const id of missedIds) { const row = rec.items[id]; if (row) { row.cps = row.cps || {}; row.cps._m = (row.cps._m || 0) + 1; } }
       S.requests += r.requests || 0;
       for (const w of r.warnings || []) if (!S.warnings.includes(w)) S.warnings.push(w);
       if (r.cookies) rec.cookies = r.cookies;
       const now = this.clockNow(S);
-      S.last_cycle = {pages: r.pages, new: nNew, snaps: r.items.length, at: now, baseline, stale: r.stale || 0, missed,
+      S.last_cycle = {pages: r.pages, new: nNew, snaps: r.items.length, at: now, baseline, stale: r.stale || 0, missed, bands: r.bands || 1,
                       t_first: r.t_first || S.last_cycle?.t_first};
       if (r.status === "ok") {
         S.cycles += 1; S.last_cycle_at = now; S.backoff_i = 0; S.api_level = "ok";
@@ -460,7 +480,8 @@ const M = {
     const early = wf != null && wa != null && wa < w - this.TOL_BEFORE && !it.in_progress;
     // Plus jamais revue alors que les scans continuaient : vendue / réservée / retirée avant la fin de sa fenêtre.
     const ended = now == null || ageNow > w + 180;
-    it.gone = early && ended && it.last_age != null && it.last_age < w - this.TOL_BEFORE;
+    const proven = ((it.cps || {})._m || 0) >= 2;   // 2 absences sur des scans complets
+    it.gone = early && ended && it.last_age != null && it.last_age < w - this.TOL_AFTER && proven;
     it.partial = early && !it.gone;
     const cur = it.in_progress ? it.last_fav : wf;
     it.is_hit = cur != null && cur >= threshold;
@@ -613,7 +634,7 @@ const brandRowClass = r => r.hits > 0 ? "hit" : "";
 const hotTag = i => i.hot ? `<span class="tag hot" title="Rythme de favoris qui mène au seuil avant la fin de la fenêtre">🔥 en chauffe</span>` : "";
 function measureTag(i) {
   if (!i.measured) return `<span class="tag p">non mesurée</span>`;
-  if (i.in_progress) return `${hotTag(i)} <span class="tag p">en cours</span>`;
+  if (i.in_progress) return i.hot ? hotTag(i) : `<span class="tag p">en cours</span>`;
   if (i.gone) return `<span class="tag hit" style="background:var(--ok)" title="Disparue des résultats avant la fin de sa fenêtre : vendue, réservée ou retirée">vendue ?</span>`;
   if (i.partial) return `<span class="tag p" title="Relevé pris avant la fin de la fenêtre">partielle</span>`;
   return "";
@@ -852,7 +873,7 @@ function renderLive(s, token) {
       <div class="stat"><div class="l">Hits (≥ ${se.hit_threshold} fav.)</div><div class="v" style="color:var(--hit-line)">${nf(s.n_hits)}</div>${s.n_gone ? `<div class="small" style="color:var(--ok)">+ ${s.n_gone} vendue(s) ?</div>` : ""}</div>
       <div class="stat"><div class="l">🔥 En chauffe</div><div class="v" style="color:var(--err)">${nf(s.n_hot)}</div></div>
       <div class="stat"><div class="l">Statut API</div><div class="api ${s.api.level}">${esc(s.api.text)}</div></div>
-      <div class="stat"><div class="l">Cycles</div><div class="v">${nf(se.cycles)}</div><div class="small muted">${nxt}${lc.pages ? ` · dernier : ${lc.pages} p., +${lc.new}${lc.missed ? `, ${lc.missed} non revues` : ""}` : ""}</div></div>
+      <div class="stat"><div class="l">Cycles</div><div class="v">${nf(se.cycles)}</div><div class="small muted">${nxt}${lc.pages ? ` · dernier : ${lc.pages} p.${lc.bands > 1 ? ` (${lc.bands} tranches de prix)` : ""}, +${lc.new}${lc.missed ? `, ${lc.missed} non revues` : ""}` : ""}</div></div>
     </div>
     ${s.stalled ? `<div class="warnbox">⏸ Veille en pause : aucun scan récent. ${INFO.serverless ? "Sur Vercel, garde cette page ouverte (écran allumé) ou configure un cron externe (voir README)." : ""}</div>` : ""}
     ${INFO.serverless ? `<div class="hint" style="margin-top:10px">ℹ Les scans sont déclenchés par cette page : garde-la ouverte${navigator.wakeLock ? " (l'écran reste allumé)" : ""}${INFO.storage === "browser" ? "" : ", ou utilise un cron externe"}.</div>` : ""}

@@ -193,9 +193,12 @@ class DemoParams(BaseModel):
 
 class ScanBody(BaseModel):
     filters: dict
-    active_ids: list[int] = []      # annonces en cours de mesure, à revoir pendant ce scan
+    active_ids: list[int] = []      # (ancien format) annonces en cours de mesure
+    active: list[list] = []         # [[id, prix], ...] annonces en cours de mesure, à revoir pendant ce scan
     max_seen: int | None = None     # plus haut ID déjà vu (détection des copies en cache)
     baseline: bool = False          # scan de référence (1 page) au lancement
+    depth: int | None = None        # profondeur à parcourir (voir tracker.needed_depth)
+    expect_new: bool = False        # un nouveau lot d'index est attendu : revérifier la page 1 si besoin
     cookies: dict | None = None
     demo: DemoParams | None = None
     debug: bool = False
@@ -228,8 +231,10 @@ def scan(body: ScanBody):
         except Exception as e:
             return {"status": "error", "message": f"{type(e).__name__}: {e}"}
     try:
-        tracker.scan_pages(client, body.filters, set(body.active_ids), body.max_seen, now_fn, sleep_fn, out,
-                           meta, warnings.append, max_pages=1 if body.baseline else tracker.MAX_PAGES)
+        active = {int(a[0]): (a[1] if len(a) > 1 else None) for a in body.active} or \
+            {int(i): None for i in body.active_ids}
+        tracker.scan_all(client, body.filters, active, body.max_seen, now_fn, sleep_fn, out, meta,
+                         warnings.append, baseline=body.baseline, depth=body.depth, expect_new=body.expect_new)
     except vinted.RateLimited as e:
         res = {"status": "rate_limited", "http": e.status}
     except tracker.StaleResults as e:
@@ -238,7 +243,8 @@ def scan(body: ScanBody):
         res = {"status": "error", "message": str(e)}
     keep = ("item_id", "title", "brand", "price", "currency", "size", "condition", "url", "photo_url",
             "posted_at", "favs", "views", "seen_at", "promoted")
-    res.update(t_first=meta.get("t_first"), max_first=meta.get("max_first"), stale=meta.get("stale", 0))
+    res.update(t_first=meta.get("t_first"), max_first=meta.get("max_first"), stale=meta.get("stale", 0),
+               bands=meta.get("bands", 1), limited=bool(meta.get("limited")))
     res.update(items=[{k: it[k] for k in keep} for it in out], pages=meta["pages"], requests=meta["requests"],
                warnings=warnings, now=now_fn(),
                cookies=(client.export_cookies() if not client.demo and client.warmed else None))

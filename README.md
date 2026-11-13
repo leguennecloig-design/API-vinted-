@@ -77,12 +77,18 @@ sur données réelles (nov. 2026) et pris en compte par l'app :
 
 Méthode : un **scan de référence** au lancement (tout ce qui est déjà en ligne est ignoré), puis toute
 annonce dont l'**ID** (attribué dans l'ordre de mise en ligne) dépasse ce plancher est nouvelle. Son heure
-de mise en ligne est **estimée à partir de son ID** entre deux lots d'index (précision ≈ ±30 s, sans biais).
-À chaque scan, l'app pagine jusqu'à avoir revu toutes les annonces en cours de mesure, et **avance un scan**
-si le créneau de mesure d'une annonce (fenêtre → fenêtre + 60 s) risquait de tomber entre deux scans.
+de mise en ligne est estimée par une **droite robuste ID → heure** (Theil-Sen sur les derniers lots
+d'index) : en démo, biais ≈ 0 s et 90 % des annonces datées à ±25 s (±1 min sur catégorie très active).
+Un brouillon publié tard (ID bien plus ancien que sa 1re apparition) est daté à son apparition.
 
-**« Vendue ? »** : une annonce qui disparaît des résultats avant la fin de sa fenêtre a très probablement
-été vendue (ou réservée / retirée). C'est compté par marque : un excellent signal de demande.
+Vinted ne sert que **10 pages (960 résultats) par recherche** : sur une catégorie très active, l'app
+**découpe automatiquement en tranches de prix** (selon la profondeur nécessaire = rythme de mise en ligne
+× âge de la plus ancienne annonce suivie), chacune avec ses 10 pages. Si aucun nouveau lot n'apparaît alors
+qu'un est attendu, la page 1 est redemandée (copie en cache). Les scans sont avancés pour encadrer
+chaque palier de mesure.
+
+**« Vendue ? »** : une annonce absente de 2 scans complets consécutifs avant la fin de sa fenêtre a très
+probablement été vendue (ou réservée / retirée). C'est compté par marque : un excellent signal de demande.
 
 ### Repérer les articles en demande (le cœur de l'app)
 - **Favoris aux paliers 5, 10 et 15 min** (fenêtre par défaut : 15 min) : pour chaque palier, l'app garde
