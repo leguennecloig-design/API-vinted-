@@ -231,6 +231,33 @@ class ScanBody(BaseModel):
     debug_page: int = 1
 
 
+class RawBody(BaseModel):
+    url: str
+    params: dict = {}
+
+
+@app.post("/api/debug/raw")
+def debug_raw(body: RawBody):
+    """TEMPORAIRE (exploration de l'API) : GET sur un hôte Vinted uniquement, réponse tronquée."""
+    if not (body.url.startswith("https://www.vinted.fr/") or body.url.startswith("https://api.vinted.fr/")):
+        raise HTTPException(400, "hôte non autorisé")
+    c = vinted.VintedClient()
+    c.warmup()
+    h = c._headers() if body.url.startswith("https://api.") else {"Accept": "application/json"}
+    r = c.session.get(body.url, params=body.params, headers=h, timeout=25)
+    try:
+        data = r.json()
+    except Exception:
+        return {"status": r.status_code, "text": r.text[:1500]}
+    def strip(x, depth=0):
+        if isinstance(x, dict):
+            return {k: ("<user>" if k in ("user", "seller") else strip(v, depth + 1)) for k, v in list(x.items())[:40]}
+        if isinstance(x, list):
+            return [strip(v, depth + 1) for v in x[:4]] + ([f"... +{len(x) - 4}"] if len(x) > 4 else [])
+        return x
+    return {"status": r.status_code, "json": strip(data)}
+
+
 @app.post("/api/scan")
 def scan(body: ScanBody):
     """Un scan sans état (mode navigateur) : renvoie les annonces vues, la page fait le suivi."""
