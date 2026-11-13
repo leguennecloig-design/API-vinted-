@@ -183,7 +183,8 @@ class DemoParams(BaseModel):
 
 class ScanBody(BaseModel):
     filters: dict
-    stop_id: int | None = None      # on pagine jusqu'à passer sous cet ID
+    active_ids: list[int] = []      # annonces en cours de mesure, à revoir pendant ce scan
+    max_seen: int | None = None     # plus haut ID déjà vu (détection des copies en cache)
     baseline: bool = False          # scan de référence (1 page) au lancement
     cookies: dict | None = None
     demo: DemoParams | None = None
@@ -216,14 +217,17 @@ def scan(body: ScanBody):
         except Exception as e:
             return {"status": "error", "message": f"{type(e).__name__}: {e}"}
     try:
-        tracker.scan_pages(client, body.filters, body.stop_id, now_fn, sleep_fn, out, meta, warnings.append,
-                           max_pages=1 if body.baseline else tracker.MAX_PAGES)
+        tracker.scan_pages(client, body.filters, set(body.active_ids), body.max_seen, now_fn, sleep_fn, out,
+                           meta, warnings.append, max_pages=1 if body.baseline else tracker.MAX_PAGES)
     except vinted.RateLimited as e:
         res = {"status": "rate_limited", "http": e.status}
+    except tracker.StaleResults as e:
+        res = {"status": "stale", "message": str(e)}
     except vinted.ApiError as e:
         res = {"status": "error", "message": str(e)}
     keep = ("item_id", "title", "brand", "price", "currency", "size", "condition", "url", "photo_url",
-            "posted_at", "favs", "views", "seen_at")
+            "posted_at", "favs", "views", "seen_at", "promoted")
+    res.update(t_first=meta.get("t_first"), max_first=meta.get("max_first"), stale=meta.get("stale", 0))
     res.update(items=[{k: it[k] for k in keep} for it in out], pages=meta["pages"], requests=meta["requests"],
                warnings=warnings, now=now_fn(),
                cookies=(client.export_cookies() if not client.demo and client.warmed else None))

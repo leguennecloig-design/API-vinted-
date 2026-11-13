@@ -44,7 +44,8 @@ SESSION_COLS = """
     warnings      TEXT NOT NULL DEFAULT '[]',
     summary       TEXT,
     id_floor      {big},
-    max_seen_id   {big}
+    max_seen_id   {big},
+    calib         TEXT
 """
 ITEM_COLS = ["session_id", "item_id", "title", "brand", "price", "currency", "size", "condition", "url",
              "photo_url", "posted_at", "first_seen", "first_age", "last_age", "last_fav", "last_views",
@@ -80,12 +81,12 @@ class DB:
                 self.execute(stmt)
             # Migration des bases créées avant la nouvelle API Vinted (sept. 2026).
             big = "BIGINT" if self.pg else "INTEGER"
-            for col in ("id_floor", "max_seen_id"):
+            for col, typ in (("id_floor", big), ("max_seen_id", big), ("calib", "TEXT")):
                 try:
                     if self.pg:
-                        self.execute(f"ALTER TABLE sessions ADD COLUMN IF NOT EXISTS {col} {big}")
+                        self.execute(f"ALTER TABLE sessions ADD COLUMN IF NOT EXISTS {col} {typ}")
                     else:
-                        self.execute(f"ALTER TABLE sessions ADD COLUMN {col} {big}")
+                        self.execute(f"ALTER TABLE sessions ADD COLUMN {col} {typ}")
                 except Exception:
                     pass
 
@@ -222,6 +223,7 @@ def _session_dict(r: dict) -> dict:
     d["warnings"] = json.loads(d.get("warnings") or "[]")
     d["last_cycle"] = json.loads(d.get("last_cycle") or "{}")
     d["summary"] = json.loads(d["summary"]) if d.get("summary") else None
+    d["calib"] = json.loads(d["calib"]) if d.get("calib") else None
     d.pop("cookies", None)  # jamais renvoyé à l'interface
     return d
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 import math
 import random
 import re
+import time
 from urllib.parse import parse_qs, urlparse
 
 BASE = "https://www.vinted.fr"
@@ -210,7 +211,9 @@ class VintedClient:
         return None
 
     def _headers(self) -> dict:
-        h = {"Accept": "application/json", "Origin": BASE, "Referer": BASE + "/", "Locale": "fr"}
+        h = {"Accept": "application/json, text/plain, */*", "Origin": BASE, "Referer": BASE + "/",
+             "Locale": self._cookie("anonymous-iso-locale") or "fr-FR", "Platform": "web",
+             "X-Next-App": "marketplace-web"}
         tok, anon = self._cookie("access_token_web"), self._cookie("anon_id")
         if tok:
             h["Authorization"] = f"Bearer {tok}"
@@ -224,6 +227,9 @@ class VintedClient:
         for attempt in (1, 2):
             try:
                 params = api_params(filters, page)
+                # Comme le site : horodatage de la requête. Sans lui, Vinted sert la même copie en
+                # cache pendant ~45 s à toutes les requêtes identiques.
+                params["time"] = int(time.time())
                 for k, v in (extra or {}).items():  # diagnostic uniquement
                     if v is None:
                         params.pop(k, None)
@@ -322,16 +328,31 @@ class DemoClient:
             "user": {"login": "non-stocké"},  # présent dans l'API, volontairement ignoré
         }
 
-    def fetch_page(self, filters: dict, page: int) -> list[dict]:
+    def fetch_page(self, filters: dict, page: int, extra: dict | None = None) -> list[dict]:
+        """Reproduit les défauts mesurés sur la vraie API : copies en cache (15 % des réponses ont
+        45 s de retard) et quelques anciennes annonces « remontées » intercalées dans les pages."""
         self.request_no += 1
         if self.request_no == 25:  # un 429 simulé, pour tester l'affichage du backoff
             raise RateLimited(429)
+        rng = random.Random(f"{self.seed}:req:{self.request_no}")
+        as_of = self.now - (45 if rng.random() < 0.15 else 0)
         need = page * PER_PAGE
         found: list[dict] = []
-        b = int(self.now // 60)
+        b = int(as_of // 60)
         for _ in range(240):
-            found += [i for i in self._bucket(b) if i["ts"] <= self.now]
+            found += [i for i in self._bucket(b) if i["ts"] <= as_of]
             if len(found) >= need:
                 break
             b -= 1
-        return [self._raw(i) for i in found[(page - 1) * PER_PAGE: need]]
+        chunk = found[(page - 1) * PER_PAGE: need]
+        for k in range(2):  # annonces anciennes remontées (ID très bas)
+            if chunk:
+                old = dict(chunk[0], id=int(as_of - 86400 * rng.randint(2, 300)) * 10 + 9,
+                           ts=as_of - 86400 * 2, title="Ancienne annonce remontée")
+                chunk.insert(rng.randrange(len(chunk)), old)
+                chunk.pop()
+        saved, self.now = self.now, as_of
+        try:
+            return [self._raw(i) for i in chunk]
+        finally:
+            self.now = saved

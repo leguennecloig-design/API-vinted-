@@ -265,7 +265,7 @@ const L = {
       ended_at: null, status: "running", demo: b.demo ? 1 : 0, speed: b.demo ? INFO.demo_speed : 1, demo_t0: b.demo ? real : null,
       seed: Math.floor(Math.random() * 1e9) + 1, filters: f, filters_label: filtersLabel(f), duration_min: dur_, window_min: win,
       hit_threshold: b.threshold, interval_s: Math.max(45, b.interval_s), cycles: 0, requests: 0, next_tick_at: 0,
-      last_cycle_at: null, id_floor: null, max_seen_id: null, backoff_i: 0, api_level: "ok", api_text: "Démarrage… premier scan imminent",
+      last_cycle_at: null, id_floor: null, max_seen_id: null, calib: [], backoff_i: 0, api_level: "ok", api_text: "Démarrage… premier scan imminent",
       last_cycle: {}, warnings: [], summary: null};
     await this.save({s, items: {}, cookies: null, snaps: 0});
     return {session_id: id};
@@ -301,10 +301,9 @@ const L = {
     this.busy = true;
     try {
       const baseline = s.id_floor == null, now0 = this.clockNow(s), W0 = s.window_min * 60;
-      // Vinted ne donne plus de date : on pagine jusqu'à la plus ancienne annonce encore à mesurer (par ID).
-      const active = Object.values(rec.items).filter(i => now0 - i.posted_at <= W0 + 120).map(i => i.item_id);
-      const stop_id = baseline ? null : (active.length ? Math.min(...active) : s.max_seen_id);
-      const body = {filters: s.filters, stop_id, baseline, cookies: rec.cookies,
+      // Annonces dont la mesure n'est pas finie : le serveur pagine jusqu'à les avoir toutes revues.
+      const active = baseline ? [] : Object.values(rec.items).filter(i => now0 - i.posted_at <= W0 + 120).map(i => i.item_id);
+      const body = {filters: s.filters, active_ids: active, max_seen: s.max_seen_id, baseline, cookies: rec.cookies,
                     demo: s.demo ? {seed: s.seed, now: now0, speed: s.speed, request_no: s.requests} : null};
       let r;
       try { r = await serverApi("/api/scan", {method: "POST", body: JSON.stringify(body)}); }
@@ -313,33 +312,38 @@ const L = {
       if (!fresh || fresh.s.status !== "running") return {ran: false};
       Object.assign(rec, fresh); const S = rec.s;
       const W = S.window_min * 60; let nNew = 0;
-      const ids = r.items.map(i => i.item_id);
+      const ids = r.items.filter(i => !i.promoted).map(i => i.item_id);
       if (baseline) {
         // Scan de référence : tout ce qui est déjà en ligne est ignoré (ID <= plancher).
-        if (r.status === "ok" && ids.length) { S.id_floor = Math.max(...ids); S.max_seen_id = S.id_floor; }
-      } else for (const it of r.items) {
-        let row = rec.items[it.item_id];
-        if (!row) {
-          if (it.item_id <= (S.id_floor || 0)) continue;                // déjà en ligne avant la veille
-          // Heure de mise en ligne estimée : milieu entre le scan précédent et celui-ci.
-          const posted = it.posted_at ?? (S.last_cycle_at ? (S.last_cycle_at + it.seen_at) / 2 : it.seen_at);
-          if (!(S.start_ts <= posted && posted <= S.capture_end)) continue;   // captation uniquement
-          row = {session_id: S.id, item_id: it.item_id, title: it.title, brand: it.brand, price: it.price, currency: it.currency,
-                 size: it.size, condition: it.condition, url: it.url, photo_url: it.photo_url, posted_at: posted,
-                 first_seen: it.seen_at, first_age: it.seen_at - posted, window_fav: null, window_age: null};
-          nNew++;
+        if (r.max_first) { S.id_floor = Math.max(...ids); S.max_seen_id = S.id_floor; S.calib = [[r.t_first, S.id_floor]]; }
+      } else {
+        // Calibration ID -> heure : (heure du scan, plus haut ID vu). Voir estimate_posted (app/tracker.py).
+        if (r.max_first && r.max_first > S.calib[S.calib.length - 1][1]) S.calib.push([r.t_first, r.max_first]);
+        const estimate = id => { for (let k = 1; k < S.calib.length; k++) if (id <= S.calib[k][1]) return (S.calib[k - 1][0] + S.calib[k][0]) / 2; return null; };
+        for (const it of r.items) {
+          let row = rec.items[it.item_id];
+          if (!row) {
+            if (it.item_id <= (S.id_floor || 0)) continue;                // déjà en ligne avant la veille
+            const posted = Math.min(it.posted_at ?? estimate(it.item_id) ?? it.seen_at, it.seen_at);
+            if (!(S.start_ts <= posted && posted <= S.capture_end)) continue;   // captation uniquement
+            row = {session_id: S.id, item_id: it.item_id, title: it.title, brand: it.brand, price: it.price, currency: it.currency,
+                   size: it.size, condition: it.condition, url: it.url, photo_url: it.photo_url, posted_at: posted,
+                   first_seen: it.seen_at, first_age: it.seen_at - posted, window_fav: null, window_age: null};
+            nNew++;
+          }
+          const age = it.seen_at - row.posted_at;
+          row.last_age = age; row.last_fav = it.favs; row.last_views = it.views;
+          if (age <= W + 60 && (row.window_age == null || age >= row.window_age)) { row.window_fav = it.favs; row.window_age = age; }
+          rec.items[it.item_id] = row; rec.snaps = (rec.snaps || 0) + 1;
         }
-        const age = it.seen_at - row.posted_at;
-        row.last_age = age; row.last_fav = it.favs; row.last_views = it.views;
-        if (age <= W + 60 && (row.window_age == null || age >= row.window_age)) { row.window_fav = it.favs; row.window_age = age; }
-        rec.items[it.item_id] = row; rec.snaps = (rec.snaps || 0) + 1;
+        if (ids.length) S.max_seen_id = Math.max(S.max_seen_id || 0, ...ids);
       }
-      if (!baseline && ids.length) S.max_seen_id = Math.max(S.max_seen_id || 0, ...ids);
+      const seenIds = new Set(r.items.map(i => i.item_id)), missed = active.filter(id => !seenIds.has(id)).length;
       S.requests += r.requests || 0;
       for (const w of r.warnings || []) if (!S.warnings.includes(w)) S.warnings.push(w);
       if (r.cookies) rec.cookies = r.cookies;
       const now = this.clockNow(S);
-      S.last_cycle = {pages: r.pages, new: nNew, snaps: r.items.length, at: now, baseline};
+      S.last_cycle = {pages: r.pages, new: nNew, snaps: r.items.length, at: now, baseline, stale: r.stale || 0, missed};
       if (r.status === "ok") {
         S.cycles += 1; S.last_cycle_at = now; S.backoff_i = 0; S.api_level = "ok";
         S.api_text = baseline ? "OK — référence prise, la captation commence" : "OK";
@@ -348,6 +352,8 @@ const L = {
         const targets = Object.values(rec.items).map(i => i.posted_at + W + 60).filter(e => now < e && e < nxt).map(e => e - 30);
         if (targets.length) nxt = Math.min(nxt, Math.max(now + 45, Math.min(...targets)));
         S.next_tick_at = Math.min(nxt, S.final_end + 1);
+      } else if (r.status === "stale") {
+        S.api_level = "warn"; S.api_text = r.message; S.next_tick_at = now + 15;    // copie en cache : on réessaie vite
       } else if (r.status === "rate_limited") {
         const bo = INFO.backoff || [30, 60, 120, 240, 480, 600], delay = bo[Math.min(S.backoff_i, bo.length - 1)];
         S.backoff_i += 1; S.api_level = "warn"; S.next_tick_at = now + delay; rec.cookies = null;
@@ -716,7 +722,7 @@ function renderLive(s, token) {
       <div class="stat"><div class="l">Annonces suivies</div><div class="v">${nf(s.n_items)}</div></div>
       <div class="stat"><div class="l">Hits (≥ ${se.hit_threshold} fav.)</div><div class="v" style="color:var(--hit-line)">${nf(s.n_hits)}</div></div>
       <div class="stat"><div class="l">Statut API</div><div class="api ${s.api.level}">${esc(s.api.text)}</div></div>
-      <div class="stat"><div class="l">Cycles</div><div class="v">${nf(se.cycles)}</div><div class="small muted">${nxt}${lc.pages ? ` · dernier : ${lc.pages} p., +${lc.new}` : ""}</div></div>
+      <div class="stat"><div class="l">Cycles</div><div class="v">${nf(se.cycles)}</div><div class="small muted">${nxt}${lc.pages ? ` · dernier : ${lc.pages} p., +${lc.new}${lc.missed ? `, ${lc.missed} non revues` : ""}` : ""}</div></div>
     </div>
     ${s.stalled ? `<div class="warnbox">⏸ Veille en pause : aucun scan récent. ${INFO.serverless ? "Sur Vercel, garde cette page ouverte (écran allumé) ou configure un cron externe (voir README)." : ""}</div>` : ""}
     ${INFO.serverless ? `<div class="hint" style="margin-top:10px">ℹ Les scans sont déclenchés par cette page : garde-la ouverte${navigator.wakeLock ? " (l'écran reste allumé)" : ""}${INFO.storage === "browser" ? "" : ", ou utilise un cron externe"}.</div>` : ""}

@@ -122,6 +122,8 @@ def tick(db: DB) -> dict:
         client.warmed = False
         cookies = None
         log.warning("HTTP %s, backoff %ss", e.status, delay)
+    except StaleResults as e:
+        upd.update(api_level="warn", api_text=f"{e}", next_tick_at=clock_now(s) + 15)
     except vinted.ApiError as e:
         n = s["backoff_i"] + 1
         upd.update(backoff_i=n, api_level="error", api_text=f"Erreur API : {e} ({n}/10)",
@@ -155,33 +157,58 @@ def _warn(db: DB, s: dict, msg: str):
         db.update_session(s["id"], warnings=s["warnings"])
 
 
-def scan_pages(client, filters: dict, stop_id: int | None, now_fn, sleep_fn,
-               out: list, meta: dict, warn, max_pages: int = MAX_PAGES) -> None:
-    """Pagine du plus récent au plus ancien et remplit `out` (annonces normalisées + heure du relevé).
+class StaleResults(vinted.ApiError):
+    """Vinted a servi une copie en cache plus ancienne que le scan précédent."""
 
-    Vinted ne donnant plus de date de mise en ligne, l'arrêt se fait sur les IDs (croissants avec
-    le temps) : on s'arrête dès que la page est passée sous `stop_id`, c.-à-d. qu'on a revu toutes les
-    annonces encore dans leur fenêtre. `out` est rempli même si une exception interrompt le scan.
+
+def scan_pages(client, filters: dict, active_ids: set[int], max_seen: int | None, now_fn, sleep_fn,
+               out: list, meta: dict, warn, max_pages: int = MAX_PAGES) -> None:
+    """Pagine (du plus récent au plus ancien) et remplit `out` : annonces normalisées + heure du relevé.
+
+    Réalité de l'API svc-catalogue (mesurée en nov. 2026) : l'ordre « newest_first » est approximatif
+    (quelques annonces anciennes « remontées » s'intercalent) et Vinted sert parfois une copie en cache
+    plus ancienne. D'où :
+    - page 1 plus ancienne que le scan précédent (ID max < max_seen) : on redemande (3 essais) ;
+    - on pagine jusqu'à avoir revu toutes les annonces en cours de mesure (`active_ids`), puis on
+      s'arrête dès que la page retombe dans des IDs déjà connus (<= max_seen).
+    `out` est rempli même si une exception interrompt le scan. meta["t_first"]/["max_first"] = heure et
+    plus haut ID de la page 1, qui servent à dater les annonces.
     """
     seen: set[int] = set()
     t0 = time.time()
     for page in range(1, max_pages + 1):
-        meta["requests"] = meta.get("requests", 0) + 1
-        raw = client.fetch_page(filters, page)
+        for attempt in range(1, 4):
+            meta["requests"] = meta.get("requests", 0) + 1
+            raw = client.fetch_page(filters, page)
+            now = now_fn()
+            items = [it for it in (vinted.normalize_item(r) for r in raw) if it]
+            fresh_ids = [i["item_id"] for i in items if not i["promoted"]]
+            if page > 1 or not max_seen or not fresh_ids or max(fresh_ids) >= max_seen:
+                break
+            meta["stale"] = meta.get("stale", 0) + 1
+            if attempt == 3:
+                raise StaleResults("Vinted renvoie des résultats en cache, nouvel essai au prochain scan")
+            sleep_fn(random.uniform(1.0, 2.0))
         meta["pages"] = page
-        now = now_fn()
-        items = [it for it in (vinted.normalize_item(r) for r in raw) if it]
+        if page == 1:
+            meta["t_first"] = now
+            meta["max_first"] = max(fresh_ids) if fresh_ids else None
         for it in items:
             if it["item_id"] in seen:
                 continue
             seen.add(it["item_id"])
             out.append({**it, "seen_at": now})
-        ordered = sorted(i["item_id"] for i in items if not i["promoted"])
-        if len(raw) < vinted.PER_PAGE or not ordered:
+        if len(raw) < vinted.PER_PAGE or not fresh_ids:
             return
-        # Médiane des IDs de la page : robuste aux quelques annonces publiées hors ordre.
-        if stop_id is None or ordered[len(ordered) // 2] < stop_id:
-            return
+        fresh_ids.sort()
+        remaining = active_ids - seen
+        if remaining:
+            # On continue tant qu'on n'est pas nettement passé sous les annonces encore à revoir
+            # (90 % de la page sous la plus ancienne d'entre elles = elles ont été vendues/supprimées).
+            if fresh_ids[int(len(fresh_ids) * 0.9)] < min(remaining):
+                return
+        elif max_seen is None or fresh_ids[len(fresh_ids) // 2] <= max_seen:
+            return  # plus rien à revoir, et on est revenu dans des annonces déjà connues
         if page == max_pages:
             if max_pages == MAX_PAGES:
                 warn(f"Limite de {MAX_PAGES} pages atteinte : catégorie trop active, "
@@ -206,21 +233,29 @@ def schedule_next(now: float, nxt: float, items, window_s: float) -> float:
     return nxt
 
 
-def stop_id_for(items: list[dict], now: float, window_s: float, max_seen: int | None) -> int | None:
-    """ID sous lequel on peut arrêter de paginer : la plus ancienne annonce encore à mesurer,
-    ou à défaut la plus récente déjà vue (tout ce qui est au-dessus est potentiellement nouveau)."""
-    active = [i["item_id"] for i in items if now - i["posted_at"] <= window_s + 120]
-    if active:
-        return min(active)
-    return max_seen
+def active_ids(items, now: float, window_s: float) -> set[int]:
+    """Annonces dont la mesure n'est pas finie (âge <= fenêtre + 2 min) : à revoir à chaque scan."""
+    return {i["item_id"] for i in items if now - i["posted_at"] <= window_s + 120}
 
 
-def classify(seen: list[dict], rows: dict, s: dict, prev_scan_at: float | None) -> int:
+def estimate_posted(item_id: int, calib: list) -> float | None:
+    """Heure de mise en ligne estimée à partir des IDs (croissants dans le temps).
+
+    `calib` = [(heure du scan, plus haut ID vu à ce scan), ...] par ordre chronologique. L'annonce a
+    été mise en ligne entre le dernier scan qui ne la « couvrait » pas encore et le premier qui la
+    couvre : on prend le milieu (précision ± intervalle / 2). Une annonce qui n'apparaît qu'en retard
+    garde donc une date juste.
+    """
+    for k in range(1, len(calib)):
+        if item_id <= calib[k][1]:
+            return (calib[k - 1][0] + calib[k][0]) / 2
+    return None
+
+
+def classify(seen: list[dict], rows: dict, s: dict, calib: list) -> int:
     """Met à jour `rows` (item_id -> ligne) avec un scan. Renvoie le nombre de nouvelles annonces.
 
-    Nouvelle annonce = ID jamais vu et supérieur au plancher (plus haut ID de la veille au lancement).
-    Heure de mise en ligne estimée = milieu entre le scan précédent et celui-ci (±intervalle/2),
-    sauf si Vinted fournit encore un horodatage.
+    Nouvelle annonce = ID jamais vu et supérieur au plancher (plus haut ID au scan de référence).
     """
     W = s["window_min"] * 60
     floor = s.get("id_floor") or 0
@@ -230,10 +265,9 @@ def classify(seen: list[dict], rows: dict, s: dict, prev_scan_at: float | None) 
         row = rows.get(iid)
         if row is None:
             if iid <= floor:
-                continue  # déjà en ligne avant la veille
-            posted = it["posted_at"]
-            if posted is None:
-                posted = (prev_scan_at + now) / 2 if prev_scan_at else now
+                continue  # déjà en ligne avant la veille (ou ancienne annonce remontée)
+            posted = it["posted_at"] or estimate_posted(iid, calib) or now
+            posted = min(posted, now)
             if not (s["start_ts"] <= posted <= s["capture_end"]):
                 continue  # postée hors captation
             row = {c: it.get(c) for c in ("title", "brand", "price", "currency", "size",
@@ -253,43 +287,59 @@ def classify(seen: list[dict], rows: dict, s: dict, prev_scan_at: float | None) 
     return new
 
 
+def apply_scan(s: dict, rows: dict, seen: list[dict], meta: dict, calib: list) -> tuple[int, dict]:
+    """Logique commune serveur / navigateur : met à jour plancher, calibration et annonces.
+    Renvoie (nb de nouvelles, champs de session à enregistrer)."""
+    upd: dict = {}
+    ids = [i["item_id"] for i in seen if not i["promoted"]]
+    if s.get("id_floor") is None:  # scan de référence : tout ce qui est en ligne est ignoré
+        if meta.get("max_first"):
+            floor = max(ids)
+            upd.update(id_floor=floor, max_seen_id=floor, calib=[[meta["t_first"], floor]])
+        return 0, upd
+    if meta.get("max_first") and meta["max_first"] > calib[-1][1]:
+        calib = [*calib, [meta["t_first"], meta["max_first"]]]
+    upd["calib"] = calib
+    new = classify(seen, rows, s, calib)
+    if ids:
+        upd["max_seen_id"] = max([*ids, s.get("max_seen_id") or 0])
+    return new, upd
+
+
 def _cycle(db: DB, s: dict, client, upd: dict):
     existing = {r["item_id"]: r for r in db.items(s["id"])}
     seen: list[dict] = []
     meta = {"requests": s["requests"], "pages": 0}
     t0 = time.time()
-    now0 = clock_now(s)
     baseline = s.get("id_floor") is None
-    stop_id = None if baseline else stop_id_for(list(existing.values()), now0, s["window_min"] * 60,
-                                                 s.get("max_seen_id"))
+    active = set() if baseline else active_ids(existing.values(), clock_now(s), s["window_min"] * 60)
     completed = False
     new = 0
     rows = dict(existing)
     try:
-        scan_pages(client, s["filters"], stop_id, lambda: clock_now(s), lambda sec: _sleep(s, sec),
-                   seen, meta, lambda m: _warn(db, s, m), max_pages=1 if baseline else MAX_PAGES)
+        scan_pages(client, s["filters"], active, s.get("max_seen_id"), lambda: clock_now(s),
+                   lambda sec: _sleep(s, sec), seen, meta, lambda m: _warn(db, s, m),
+                   max_pages=1 if baseline else MAX_PAGES)
         completed = True
     finally:
-        ids = [i["item_id"] for i in seen]
-        if baseline:
-            if completed and ids:
-                upd.update(id_floor=max(ids), max_seen_id=max(ids))
-        else:
-            new = classify(seen, rows, s, s.get("last_cycle_at"))
-            s["_rows"] = rows
-            changed = [r for iid, r in rows.items() if iid in {i["item_id"] for i in seen}]
-            if changed:
-                db.upsert_items(changed)
-            snaps = [{"item_id": i["item_id"], "ts": i["seen_at"], "age": i["age"], "favs": i["favs"],
-                      "views": i["views"]} for i in seen if "age" in i]
-            if snaps:
-                db.insert_snapshots(s["id"], snaps)
-            if ids:
-                upd["max_seen_id"] = max([*ids, s.get("max_seen_id") or 0])
+        new, u = apply_scan(s, rows, seen, meta, s.get("calib") or [])
+        if "calib" in u:
+            u["calib"] = json.dumps(u["calib"])
+        upd.update(u)
+        s["_rows"] = rows
+        seen_ids = {i["item_id"] for i in seen}
+        changed = [r for iid, r in rows.items() if iid in seen_ids]
+        if changed and not baseline:
+            db.upsert_items(changed)
+        snaps = [{"item_id": i["item_id"], "ts": i["seen_at"], "age": i["age"], "favs": i["favs"],
+                  "views": i["views"]} for i in seen if "age" in i]
+        if snaps:
+            db.insert_snapshots(s["id"], snaps)
         upd["requests"] = meta["requests"]
-        upd["last_cycle"] = {"pages": meta["pages"], "new": new, "snaps": len(seen),
+        missed = len(active - seen_ids)
+        upd["last_cycle"] = {"pages": meta["pages"], "new": new, "snaps": len(snaps),
                              "duration_s": round(time.time() - t0, 1), "at": clock_now(s),
-                             "baseline": baseline}
+                             "baseline": baseline, "stale": meta.get("stale", 0), "missed": missed}
     if completed:
         at = clock_now(s)
         upd.update(cycles=s["cycles"] + 1, last_cycle_at=at)
